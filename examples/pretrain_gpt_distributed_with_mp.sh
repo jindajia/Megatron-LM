@@ -3,8 +3,10 @@
 # Runs the "345M" parameter model
 
 export CUDA_DEVICE_MAX_CONNECTIONS=1
+# export NCCL_DEBUG=INFO
+# export NCCL_DEBUG_SUBSYS=COLL
 
-GPUS_PER_NODE=8
+GPUS_PER_NODE=2
 # Change for multinode config
 MASTER_ADDR=localhost
 MASTER_PORT=6000
@@ -12,10 +14,12 @@ NNODES=1
 NODE_RANK=0
 WORLD_SIZE=$(($GPUS_PER_NODE*$NNODES))
 
-CHECKPOINT_PATH=<Specify path>
-VOCAB_FILE=<Specify path to file>/gpt2-vocab.json
-MERGE_FILE=<Specify path to file>/gpt2-merges.txt
-DATA_PATH=<Specify path and file prefix>_text_document
+CHECKPOINT_PATH=/ocean/projects/asc200010p/jjia1/Developer/LLM/gpt2/checkpoint/demo
+COLLECTIVE_PATH=/ocean/projects/asc200010p/jjia1/Developer/LLM/gpt2/checkpoint/collective
+VOCAB_FILE=/ocean/projects/asc200010p/jjia1/Developer/LLM/gpt2/vocab_file/gpt2-vocab.json
+MERGE_FILE=/ocean/projects/asc200010p/jjia1/Developer/LLM/gpt2/merge_file/gpt2-merges.txt
+DATA_PATH=/ocean/projects/asc200010p/jjia1/Developer/LLM/gpt2/datapath/gpt2_text_document
+TENSORBOARD_DIR=/ocean/projects/asc200010p/jjia1/Developer/LLM/gpt2/tensorboard3
 
 DISTRIBUTED_ARGS="
     --nproc_per_node $GPUS_PER_NODE \
@@ -26,8 +30,8 @@ DISTRIBUTED_ARGS="
 "
 
 GPT_ARGS="
-    --tensor-model-parallel-size 2 \
-    --pipeline-model-parallel-size 2 \
+    --tensor-model-parallel-size 1 \
+    --pipeline-model-parallel-size 1 \
     --sequence-parallel \
     --num-layers 24 \
     --hidden-size 1024 \
@@ -37,7 +41,7 @@ GPT_ARGS="
     --micro-batch-size 4 \
     --global-batch-size 16 \
     --lr 0.00015 \
-    --train-iters 500000 \
+    --train-iters 300 \
     --lr-decay-iters 320000 \
     --lr-decay-style cosine \
     --min-lr 1.0e-5 \
@@ -55,17 +59,27 @@ DATA_ARGS="
 "
 
 OUTPUT_ARGS="
-    --log-interval 100 \
+    --log-interval 10 \
     --save-interval 10000 \
     --eval-interval 1000 \
-    --eval-iters 10
+    --eval-iters 10 \
+    --log-validation-ppl-to-tensorboard \
+    --log-timers-to-tensorboard \
+    --tensorboard-dir ${TENSORBOARD_DIR} \
+    --tensorboard-log-interval 5
 "
 
-torchrun $DISTRIBUTED_ARGS pretrain_gpt.py \
+COLLECTIVE_ARGS="
+    --save-collective-data \
+    --save-collective-data-path ${COLLECTIVE_PATH} \
+    --save-collective-interval 10
+"
+
+torchrun $DISTRIBUTED_ARGS ../pretrain_gpt.py \
     $GPT_ARGS \
     $DATA_ARGS \
     $OUTPUT_ARGS \
+    $COLLECTIVE_ARGS \
     --distributed-backend nccl \
-    --save $CHECKPOINT_PATH \
-    --load $CHECKPOINT_PATH
-
+    # --save $CHECKPOINT_PATH \
+    # --load $CHECKPOINT_PATH
