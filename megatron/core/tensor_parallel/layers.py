@@ -906,9 +906,9 @@ class RowParallelLinear(torch.nn.Module):
             if iteration % self.save_collective_interval == 0:
                 common_path = os.path.join(self.save_collective_data_path, 'tensor_parallel')
                 savepath = common_path
-                savepath = os.path.join(savepath, str(iteration), str(self.layer_info[1]))
+                savepath = os.path.join(savepath, f'iteration_{iteration:05d}', f'layer_{self.layer_info[0]:03d}', str(self.layer_info[1]))
                 tensor_rank = self.tensor_model_parallel_rank
-                data_path = os.path.join(savepath, f'{tensor_rank}.pt')
+                data_path = os.path.join(savepath, f'tensor_rank_{tensor_rank}.pt')
                 dirname = os.path.dirname(data_path)
                 os.makedirs(dirname, exist_ok = True)
                 torch.save(output_parallel, data_path)
