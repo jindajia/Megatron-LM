@@ -39,6 +39,7 @@ def parse_args(extra_args_provider=None, ignore_unknown_args=False):
     parser = _add_inference_args(parser)
     parser = _add_transformer_engine_args(parser)
     parser = _add_retro_args(parser)
+    parser = _add_collective_communication_args(parser)
 
     # Custom arguments.
     if extra_args_provider is not None:
@@ -910,7 +911,15 @@ def _add_learning_rate_args(parser):
 
     return parser
 
-
+def _add_collective_communication_args(parser):
+    group = parser.add_argument_group(title='collective communication data checkpoints')
+    group.add_argument('--save-collective-data', action='store_true', default=None,
+                       help='Save collective communication data')
+    group.add_argument('--save-collective-data-path', type=str, default=None,
+                       help='Output directory to save collective data to.')
+    group.add_argument('--save-collective-interval', type=int, default=20,
+                       help='Number of iterations between collective communication data saves.')
+    return parser
 def _add_checkpointing_args(parser):
     group = parser.add_argument_group(title='checkpointing')
 

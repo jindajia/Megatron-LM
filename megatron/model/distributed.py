@@ -4,10 +4,12 @@ import math
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
 from typing import Dict, List
+from megatron import get_args
 
 import torch
-
+import os
 from megatron.core import mpu
+from megatron import get_training_info
 
 from .module import MegatronModule
 
@@ -298,7 +300,7 @@ class DistributedDataParallel(DistributedDataParallelBase):
                 dtype = torch.float if accumulate_allreduce_grads_in_fp32 else param.dtype
 
                 params = grad_dtype_to_params.get(dtype, [])
-                params.append(param)
+                params.append((name, param,))
                 grad_dtype_to_params[dtype] = params
 
                 # Calculate number of elements per dtype.
@@ -319,7 +321,7 @@ class DistributedDataParallel(DistributedDataParallelBase):
                 numel,
                 numel_padded,
                 dtype,
-                params,
+                [item[1] for item in params],
                 data_parallel_group,
                 bucket_size,
                 param_to_name,
@@ -329,15 +331,18 @@ class DistributedDataParallel(DistributedDataParallelBase):
             # Parameters are laid out in the corresponding grad_buffer in reverse
             # order, so count indices from the back.
             index = grad_dtype_to_numel[dtype]
-            for param in params:
+            for item in params:
+                name = item[0]
+                param = item[1]
                 self.param_to_grad_buffer[param] = self.grad_buffers[dtype]
                 if dtype not in self.grad_buffer_param_index_map:
                     self.grad_buffer_param_index_map[dtype] = {}
 
                 index -= param.data.nelement()
-                self.grad_buffer_param_index_map[dtype][param] = (
+                self.grad_buffer_param_index_map[dtype][name] = (
                     index,
                     index + param.data.nelement(),
+                    param.shape,
                 )
 
         # Register backward hook.
@@ -352,7 +357,12 @@ class DistributedDataParallel(DistributedDataParallelBase):
                 grad_acc = param_tmp.grad_fn.next_functions[0][0]
                 grad_acc.register_hook(self._make_param_hook(param, self.param_to_grad_buffer))
                 self.grad_accs.append(grad_acc)
-
+        
+        # Save Collective Communication data
+        args = get_args()
+        self.collective_data_save_interval = args.save_collective_interval
+        self.save_collective_data = args.save_collective_data
+        self.save_collective_path = args.save_collective_data_path
     def _make_param_hook(
         self, param: torch.nn.Parameter, param_to_grad_buffer: Dict[torch.nn.Parameter, GradBuffer]
     ):
@@ -409,5 +419,28 @@ class DistributedDataParallel(DistributedDataParallelBase):
         When overlap_grad_reduce is set to False, calls synchronous
         all-reduce.
         """
+        if self.save_collective_data:
+            iteration = get_training_info().get_iteration()
+            save_interval = self.collective_data_save_interval
+            common_path = self.save_collective_path
+            if iteration == 0:
+                savepath = common_path
+                savepath = os.path.join(savepath, 'map',
+                                        'grad_buffer_param_index_map.pth')
+                dirname = os.path.dirname(savepath)
+                os.makedirs(dirname, exist_ok = True)
+                torch.save(self.grad_buffer_param_index_map, savepath)
+            if iteration % save_interval == 0:
+                savepath = common_path
+                savepath = os.path.join(savepath, str(iteration))
+                data_rank = mpu.get_data_parallel_rank()
+                for dtype, grad_buffer in self.grad_buffers.items():
+                    grad_buffer_path = os.path.join(savepath, str(dtype), f'{data_rank}.pt')
+                    dirname = os.path.dirname(grad_buffer_path)
+                    os.makedirs(dirname, exist_ok = True)
+                    torch.save(grad_buffer.data, grad_buffer_path)
+                    if torch.distributed.is_initialized():
+                        if torch.distributed.get_rank() == 0:
+                            print(f"JINDA_DEBUG.distributed.allreduce_gradients iteration: {iteration} numel: {grad_buffer.numel} grad_buffer: {grad_buffer.data.shape}")
         for grad_buffer in self.grad_buffers.values():
             grad_buffer.done()

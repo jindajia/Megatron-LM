@@ -10,6 +10,7 @@ from megatron import dist_signal_handler
 from megatron.tokenizer import build_tokenizer
 from .microbatches import build_num_microbatches_calculator
 from .timers import Timers
+from .training_info import TrainingInfo
 
 _GLOBAL_ARGS = None
 _GLOBAL_RETRO_ARGS = None
@@ -19,6 +20,7 @@ _GLOBAL_TENSORBOARD_WRITER = None
 _GLOBAL_ADLR_AUTORESUME = None
 _GLOBAL_TIMERS = None
 _GLOBAL_SIGNAL_HANDLER = None
+_GLOBAL_TRAINING_INFO = None
 
 def get_args():
     """Return arguments."""
@@ -73,6 +75,12 @@ def get_signal_handler():
     return _GLOBAL_SIGNAL_HANDLER
 
 
+def get_training_info():
+    """Return Training info"""
+    _ensure_var_is_initialized(_GLOBAL_TRAINING_INFO, 'training info')
+    return _GLOBAL_TRAINING_INFO
+
+
 def _set_signal_handler():
     global _GLOBAL_SIGNAL_HANDLER
     _ensure_var_is_not_initialized(_GLOBAL_SIGNAL_HANDLER, 'signal handler')
@@ -94,6 +102,7 @@ def set_global_variables(args, build_tokenizer=True):
     _set_tensorboard_writer(args)
     _set_adlr_autoresume(args)
     _set_timers(args)
+    _set_training_info(args)
 
     if args.exit_signal_handler:
         _set_signal_handler()
@@ -176,6 +185,13 @@ def _set_timers(args):
     global _GLOBAL_TIMERS
     _ensure_var_is_not_initialized(_GLOBAL_TIMERS, 'timers')
     _GLOBAL_TIMERS = Timers(args.timing_log_level, args.timing_log_option)
+
+
+def _set_training_info(args):
+    """Initialize training info."""
+    global _GLOBAL_TRAINING_INFO
+    _ensure_var_is_not_initialized(_GLOBAL_TRAINING_INFO, 'training info')
+    _GLOBAL_TRAINING_INFO = TrainingInfo()
 
 
 def _ensure_var_is_initialized(var, name):
