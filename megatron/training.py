@@ -9,7 +9,7 @@ import time
 # The earliest we can measure the start time.
 _TRAIN_START_TIME = time.time()
 import torch
-
+import os
 from megatron import get_args
 from megatron import get_signal_handler
 from megatron import get_timers
@@ -47,6 +47,33 @@ def print_datetime(string):
     torch.distributed.barrier()
     time_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     print_rank_0('[' + string + '] datetime: {} '.format(time_str))
+
+
+def save_config(args):
+    if args.save_collective_data:
+        if mpu.get_tensor_model_parallel_rank() == 0:
+            common_path = os.path.join(args.save_collective_data_path, 'config')
+            savepath = common_path
+            data_path = os.path.join(savepath, f'config.txt')
+            dirname = os.path.dirname(data_path)
+            os.makedirs(dirname, exist_ok = True)
+            str_list = []
+            for arg in vars(args):
+                dots = '.' * (48 - len(arg))
+                str_list.append('  {} {} {}'.format(arg, dots, getattr(args, arg)))
+            try:
+                # Open the file in write mode
+                with open(data_path, 'w') as file:
+                    # Iterate through each string in the list
+                    for s in str_list:
+                        # Write the string followed by a newline
+                        file.write(s + '\n')
+                
+                # If no exceptions occurred, print the success message
+                print_rank_0(f"Strings saved successfully to {data_path}")
+            except Exception as e:
+                # If an exception occurred, print an error message
+                print_rank_0(f"An error occurred while saving the strings: {e}")
 
 
 def pretrain(train_valid_test_dataset_provider,
@@ -114,6 +141,9 @@ def pretrain(train_valid_test_dataset_provider,
     print_datetime('after model, optimizer, and learning rate '
                    'scheduler are built')
     config = get_model_config(model[0])
+
+    # Save arguments
+    save_config(args)
 
     # Data stuff.
     timers('train/valid/test-data-iterators-setup', log_level=0).start(
