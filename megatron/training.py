@@ -17,6 +17,7 @@ from megatron import get_timers
 from megatron import get_tensorboard_writer
 from megatron import get_current_global_batch_size
 from megatron import get_num_microbatches
+from megatron import get_training_info
 from megatron import is_last_rank
 from megatron import update_num_microbatches
 from megatron.core import mpu, tensor_parallel
@@ -677,6 +678,7 @@ def train(forward_step_func, model, optimizer, opt_param_scheduler,
     """Train the model function."""
     args = get_args()
     timers = get_timers()
+    training_info = get_training_info()
 
     # Write args to tensorboard
     write_args_to_tensorboard()
@@ -690,6 +692,7 @@ def train(forward_step_func, model, optimizer, opt_param_scheduler,
 
     # Iterations.
     iteration = args.iteration
+    training_info.set_iteration(iteration)
 
     timers('interval-time', log_level=0).start(barrier=True)
     print_datetime('before the start of training step')
@@ -704,6 +707,7 @@ def train(forward_step_func, model, optimizer, opt_param_scheduler,
                        optimizer,
                        opt_param_scheduler)
         iteration += 1
+        training_info.set_iteration(iteration)
         args.consumed_train_samples += mpu.get_data_parallel_world_size() * \
                                        args.micro_batch_size * \
                                        get_num_microbatches()
