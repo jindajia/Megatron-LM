@@ -14,6 +14,7 @@ import torch.nn.init as init
 from torch.cuda.amp import custom_bwd, custom_fwd
 from torch.nn.parameter import Parameter
 
+from megatron import get_args, get_num_microbatches
 from megatron.core.model_parallel_config import ModelParallelConfig
 from megatron.core.parallel_state import (
     get_global_memory_buffer,
@@ -597,6 +598,7 @@ class ColumnParallelLinear(torch.nn.Module):
         self.output_size_per_partition = divide(output_size, world_size)
         self.skip_bias_add = skip_bias_add
         self.config = config
+        self.save_collective_data = False
 
         # Parameters.
         # Note: torch.nn.functional.linear performs XA^T + b and as a result
@@ -898,6 +900,21 @@ class RowParallelLinear(torch.nn.Module):
             async_grad_allreduce=False,
             sequence_parallel=False,
         )
+        args = get_args()
+        if self.save_collective_data:
+            iteration = args.curr_iteration
+            if iteration % self.save_collective_interval == 0:
+                common_path = os.path.join(self.save_collective_data_path, 'tensor_parallel')
+                savepath = common_path
+                savepath = os.path.join(savepath, str(iteration), str(self.layer_info[1]))
+                tensor_rank = self.tensor_model_parallel_rank
+                data_path = os.path.join(savepath, f'{tensor_rank}.pt')
+                dirname = os.path.dirname(data_path)
+                os.makedirs(dirname, exist_ok = True)
+                torch.save(output_parallel, data_path)
+                if torch.distributed.is_initialized():
+                    if torch.distributed.get_rank() == 0:
+                        print(f'JINDA_DEBUG.layers.RowParallelLinear.foward.reduce.output_parallel iteration: {iteration} sequence_parrlel: {self.sequence_parallel} dtype: {output_parallel.dtype} output_parallel.shape: {output_parallel.shape} layerName: {self.layer_info[1]} layer: {self.layer_info[0]}')
 
         # All-reduce across all the partitions.
         if self.sequence_parallel:

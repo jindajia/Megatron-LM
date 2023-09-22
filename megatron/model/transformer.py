@@ -784,6 +784,13 @@ class ParallelTransformerLayer(MegatronModule):
             layer_number,
             attention_type=AttnType.self_attn,
             attn_mask_type=self_attn_mask_type)
+        if args.save_collective_data:
+            self.self_attention.dense.layer_info = (layer_number, 'SelfAttention',)
+            self.self_attention.dense.tensor_model_parallel_rank = mpu.get_tensor_model_parallel_rank()
+            self.self_attention.dense.save_collective_data = args.save_collective_data
+            self.self_attention.dense.save_collective_data_path = args.save_collective_data_path
+            self.self_attention.dense.save_collective_interval = args.save_collective_interval
+
         self.hidden_dropout = config.hidden_dropout
         self.bias_dropout_fusion = config.bias_dropout_fusion
         self.drop_path = DropPath(drop_path_rate) if drop_path_rate > 0.0 else None
@@ -806,8 +813,15 @@ class ParallelTransformerLayer(MegatronModule):
         # MLP
         if args.num_experts is not None:
             self.mlp = SwitchMLP(config)
+            self.mlp.dense_4h_to_h.layer_info = (layer_number, 'SwitchMLP')
         else:
             self.mlp = ParallelMLP(config)
+            self.mlp.dense_4h_to_h.layer_info = (layer_number, 'ParallelMLP')
+        if args.save_collective_data:
+            self.mlp.dense_4h_to_h.tensor_model_parallel_rank = mpu.get_tensor_model_parallel_rank()
+            self.mlp.dense_4h_to_h.save_collective_data = args.save_collective_data
+            self.mlp.dense_4h_to_h.save_collective_data_path = args.save_collective_data_path
+            self.mlp.dense_4h_to_h.save_collective_interval = args.save_collective_interval
 
         # Set bias+dropout+add fusion grad_enable execution handler.
         TORCH_MAJOR = int(torch.__version__.split('.')[0])
