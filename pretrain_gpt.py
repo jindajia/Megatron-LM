@@ -18,6 +18,13 @@ from megatron.utils import get_ltor_masks_and_position_ids
 from megatron.utils import average_losses_across_data_parallel_group
 from megatron.arguments import core_transformer_config_from_args
 
+def print_forward_trace(module, args, prefix="forward.layer0"):
+    print_rank_0(f"JINDA_DEBUG  Layer: {prefix} ({module.__class__.__name__})")
+
+def print_backwards_trace(module, grad_output, prefix="backwards.layer0"):
+    print_rank_0(f"JINDA_DEBUG  Layer: {prefix} ({module.__class__.__name__})")
+
+
 def model_provider(pre_process=True, post_process=True):
     """Build the model."""
     args = get_args()
@@ -31,7 +38,24 @@ def model_provider(pre_process=True, post_process=True):
         pre_process=pre_process,
         post_process=post_process
     )
+    # for i in range(config.num_layers // args.pipeline_model_parallel_size):
+    #     prefix_forward = f"forward.layer{i}"
+    #     hook_forward_function = partial(print_forward_trace, prefix=prefix_forward)
+    #     model.language_model.encoder.layers[i].input_norm.register_forward_pre_hook(hook_forward_function)
+    #     model.language_model.encoder.layers[i].self_attention.query_key_value.register_forward_pre_hook(hook_forward_function)
+    #     model.language_model.encoder.layers[i].self_attention.dense.register_forward_pre_hook(hook_forward_function)
+    #     model.language_model.encoder.layers[i].post_attention_norm.register_forward_pre_hook(hook_forward_function)
+    #     model.language_model.encoder.layers[i].mlp.dense_h_to_4h.register_forward_pre_hook(hook_forward_function)
+    #     model.language_model.encoder.layers[i].mlp.dense_4h_to_h.register_forward_pre_hook(hook_forward_function)
 
+    #     prefix_backwards = f"backwards.layer{i}"
+    #     hook_backwards_function = partial(print_backwards_trace, prefix=prefix_backwards)
+    #     model.language_model.encoder.layers[i].input_norm.register_full_backward_pre_hook(hook_backwards_function)
+    #     model.language_model.encoder.layers[i].self_attention.query_key_value.register_full_backward_pre_hook(hook_backwards_function)
+    #     model.language_model.encoder.layers[i].self_attention.dense.register_full_backward_pre_hook(hook_backwards_function)
+    #     model.language_model.encoder.layers[i].post_attention_norm.register_full_backward_pre_hook(hook_backwards_function)
+    #     model.language_model.encoder.layers[i].mlp.dense_h_to_4h.register_full_backward_pre_hook(hook_backwards_function)
+    #     model.language_model.encoder.layers[i].mlp.dense_4h_to_h.register_full_backward_pre_hook(hook_backwards_function)
     return model
 
 

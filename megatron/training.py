@@ -9,6 +9,7 @@ import time
 # The earliest we can measure the start time.
 _TRAIN_START_TIME = time.time()
 import torch
+from functools import partial
 
 from megatron import get_args
 from megatron import get_signal_handler
@@ -374,7 +375,7 @@ def setup_model_and_optimizer(model_provider_func,
     optimizer = get_megatron_optimizer(model, no_wd_decay_cond,
                                        scale_lr_cond, lr_mult)
     opt_param_scheduler = get_optimizer_param_scheduler(optimizer)
-
+    print_rank_0(f'JINDA_DEBUG fucking optimizer {type(optimizer)}')
     if args.load is not None:
         timers = get_timers()
         timers('load-checkpoint', log_level=0).start(barrier=True)
@@ -480,6 +481,11 @@ def train_step(forward_step_func, data_iterator,
         return loss_reduced, skipped_iter, grad_norm, num_zeros_in_grad
     return {}, skipped_iter, grad_norm, num_zeros_in_grad
 
+def print_forward_trace(module, args, prefix="forward.layer0"):
+    print_rank_0(f"JINDA_DEBUG Layer: {prefix} ({module.__class__.__name__})")
+
+def print_backwards_trace(module, grad_output, prefix="backwards.layer0"):
+    print_rank_0(f"JINDA_DEBUG Layer: {prefix} ({module.__class__.__name__})")
 
 def training_log(loss_dict, total_loss_dict, learning_rate, iteration,
                  loss_scale, report_memory_flag, skipped_iter,
@@ -614,6 +620,7 @@ def training_log(loss_dict, total_loss_dict, learning_rate, iteration,
         elapsed_time = timers('interval-time').elapsed(barrier=True)
         elapsed_time_per_iteration = elapsed_time / total_iterations
         if writer:
+            print_rank_last(f"JINDADEBUG.timers iteration-time writer: {writer}, iteration: {iteration}")
             if args.log_timers_to_tensorboard:
                 writer.add_scalar('iteration-time',
                                   elapsed_time_per_iteration, iteration)
@@ -686,6 +693,28 @@ def train(forward_step_func, model, optimizer, opt_param_scheduler,
 
     # Iterations.
     iteration = args.iteration
+    # optimizer.set_iteration(iteration)
+
+    # log Hook function
+    for i in range(config.num_layers // args.pipeline_model_parallel_size):
+        model_module = model[0].module.module
+        prefix_forward = f"forward.layer{i}"
+        hook_forward_function = partial(print_forward_trace, prefix=prefix_forward)
+        model_module.language_model.encoder.layers[i].input_norm.register_forward_pre_hook(hook_forward_function)
+        model_module.language_model.encoder.layers[i].self_attention.query_key_value.register_forward_pre_hook(hook_forward_function)
+        model_module.language_model.encoder.layers[i].self_attention.dense.register_forward_pre_hook(hook_forward_function)
+        model_module.language_model.encoder.layers[i].post_attention_norm.register_forward_pre_hook(hook_forward_function)
+        model_module.language_model.encoder.layers[i].mlp.dense_h_to_4h.register_forward_pre_hook(hook_forward_function)
+        model_module.language_model.encoder.layers[i].mlp.dense_4h_to_h.register_forward_pre_hook(hook_forward_function)
+
+        prefix_backwards = f"backwards.layer{i}"
+        hook_backwards_function = partial(print_backwards_trace, prefix=prefix_backwards)
+        model_module.language_model.encoder.layers[i].input_norm.register_full_backward_pre_hook(hook_backwards_function)
+        model_module.language_model.encoder.layers[i].self_attention.query_key_value.register_full_backward_pre_hook(hook_backwards_function)
+        model_module.language_model.encoder.layers[i].self_attention.dense.register_full_backward_pre_hook(hook_backwards_function)
+        model_module.language_model.encoder.layers[i].post_attention_norm.register_full_backward_pre_hook(hook_backwards_function)
+        model_module.language_model.encoder.layers[i].mlp.dense_h_to_4h.register_full_backward_pre_hook(hook_backwards_function)
+        model_module.language_model.encoder.layers[i].mlp.dense_4h_to_h.register_full_backward_pre_hook(hook_backwards_function)
 
     # Setup some training config params
     config.grad_scale_func = optimizer.scale_loss
@@ -699,6 +728,7 @@ def train(forward_step_func, model, optimizer, opt_param_scheduler,
     print_datetime('before the start of training step')
     report_memory_flag = True
     while iteration < args.train_iters:
+        print_rank_0(f"JINDA_DEBUG.training.iteration: {iteration} start...")
         if args.profile and \
            iteration == args.profile_step_start and \
            torch.distributed.get_rank() in args.profile_ranks:
@@ -714,7 +744,9 @@ def train(forward_step_func, model, optimizer, opt_param_scheduler,
                        optimizer,
                        opt_param_scheduler,
                        config)
+        print_rank_0(f"JINDA_DEBUG.training.iteration: {iteration} finished...")
         iteration += 1
+        # optimizer.set_iteration(iteration)
         args.consumed_train_samples += mpu.get_data_parallel_world_size() * \
                                        args.micro_batch_size * \
                                        get_num_microbatches()
@@ -729,6 +761,17 @@ def train(forward_step_func, model, optimizer, opt_param_scheduler,
                                           iteration, loss_scale,
                                           report_memory_flag, skipped_iter,
                                           grad_norm, params_norm, num_zeros_in_grad)
+
+        # print_rank_last(f"JINDADEBUG.trainning model len: {len(model)}")
+        # if iteration % args.log_interval == 0:
+        #     for model_id, model_value in enumerate(model):
+        #         print_rank_last(f"JINDADEBUG.trainning.model modelid: {model_id}, model {model_value}")
+        #         for dtype, param_map in model_value.grad_buffer_param_index_map.items():
+        #             print_rank_last(f"JINDADEBUG.trainning.model.grad_buffer_param_index_map dtype: {dtype}")
+        #             for param, (buf_start, buf_end) in param_map.items():
+        #                 print_rank_last(f"JINDADEBUG.trainning.model.grad_buffer_param_index_map.param_map param {param.data.shape}")
+                            
+
 
         # Autoresume
         if args.adlr_autoresume and \

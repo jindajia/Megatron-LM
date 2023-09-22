@@ -73,6 +73,9 @@ def gather_split_1d_tensor(tensor):
         Arguments:
             tensor: A Tensor or view of this rank's portion of the data.
     """
+    if torch.distributed.is_initialized():
+        if torch.distributed.get_rank() == 0:
+            print(f"JINDA_DEBUG.utils.gather_split_1d_tensor dtype: {tensor.dtype} tensorshape: {tensor.shape}")
     numel_gathered = torch.numel(tensor) * parallel_state.get_tensor_model_parallel_world_size()
     gathered = torch.empty(
         numel_gathered, dtype=tensor.dtype, device=torch.cuda.current_device(), requires_grad=False

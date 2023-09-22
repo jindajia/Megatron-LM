@@ -899,15 +899,23 @@ class RowParallelLinear(torch.nn.Module):
             sequence_parallel=False,
         )
 
-        # All-reduce across all the partitions.
+        if torch.distributed.is_initialized():
+            if torch.distributed.get_rank() == 0:
+                print(f'JINDA_DEBUG.layers.RowParallelLinear.foward.reduce.output_parallel sequence_parrlel: {self.sequence_parallel} dtype: {output_parallel.dtype}  ,output_parallel.shape: {output_parallel.shape}')
         if self.sequence_parallel:
             output_ = reduce_scatter_to_sequence_parallel_region(output_parallel)
         else:
             output_ = reduce_from_tensor_model_parallel_region(output_parallel)
+        if torch.distributed.is_initialized():
+            if torch.distributed.get_rank() == 0:
+                print(f'JINDA_DEBUG.layers.RowParallelLinear.foward.reduce.output_ sequence_parrlel: {self.sequence_parallel} dtype: {output_.dtype}  ,output_.shape: {output_.shape}')
         if not self.skip_bias_add:
             output = output_ + self.bias if self.bias is not None else output_
             output_bias = None
         else:
             output = output_
             output_bias = self.bias
+        if torch.distributed.is_initialized():
+            if torch.distributed.get_rank() == 0:
+                print(f'JINDA_DEBUG.layers.RowParallelLinear.foward.reduce.output sequence_parrlel: {self.sequence_parallel} dtype: {output.dtype}  ,output.shape: {output.shape}')
         return output, output_bias

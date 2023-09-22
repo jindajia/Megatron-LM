@@ -6,7 +6,8 @@
 from apex.optimizers import FusedAdam as Adam
 import math
 import torch
-
+from itertools import islice
+import os
 from megatron import get_args
 from megatron import get_timers
 from megatron import print_rank_0
@@ -15,6 +16,10 @@ from megatron.model.module import param_is_not_shared
 
 from .optimizer import MixedPrecisionOptimizer, _zero_grad_group_helper
 
+def ensure_directory_exists(filename):
+    """Build filename's path if it does not already exists."""
+    dirname = os.path.dirname(filename)
+    os.makedirs(dirname, exist_ok = True)
 
 class Range:
     """
@@ -371,6 +376,9 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
         assert isinstance(optimizer, Adam), \
             "Only Adam currently supported, due to checkpointing requirements."
 
+        self.iteration = 0
+        self.map_has_saved = False
+
         # Model grad buffer ranges.
         self.model_gbuf_ranges = []
         for model_index, model in enumerate(self.models):
@@ -416,6 +424,7 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
                     device = grad_buffer.data.device)
                 param_buffer = param_buffer[:grad_buffer.numel_padded]
                 current_param_buffers[dtype] = param_buffer
+                print(f"JINDADEBUG.DistributedOptimizer model_index: {model_index}, current_param_buffers dtype: {dtype}, param_buffer.shape: {param_buffer.shape}")
             self.param_buffers.append(current_param_buffers)
 
         # Update optimizer groups.
@@ -425,6 +434,8 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
             [ g["orig_group"] for g in self.opt_group_ranges ]
         self.optimizer.load_state_dict(self.optimizer.state_dict())
 
+    def set_iteration(self, iteration):
+        self.iteration = iteration
 
     def get_model_param_range_map(self, param):
         """
@@ -884,7 +895,36 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
                 pbuf_views[data_parallel_rank],
                 group = data_parallel_group,
             )
+        # slice = 10
+        # save_interval = 10
+        # pipeline_parallel = (mpu.get_pipeline_model_parallel_world_size() > 1)
+        # tensor_rank = mpu.get_tensor_model_parallel_rank()
+        # pipeline_rank = mpu.get_pipeline_model_parallel_rank()
+        # checkpoints_path = '/ocean/projects/asc200010p/jjia1/Developer/LLM/gpt2/checkpoint/demo'
+        # iteration = self.iteration
+        # if not self.map_has_saved:
+        #     common_path = os.path.join(checkpoints_path, 'map')
+        #     ensure_directory_exists(common_path)
+        #     # Optimizer ranges.
+        #     optimizer_path = os.path.join(common_path, 'optimizer')
+        #     optimizer_path = os.path.join(optimizer_path, 'optimizer_state.pt')
+        #     # ensure_directory_exists(optimizer_path)
+        #     # self.save_parameter_state(optimizer_path)
+        #     # print_rank_0('optimizer state saved succeed')
+        #     self.map_has_saved = True
 
+        # if iteration % save_interval == 0:
+        #     model = self.models[0]
+        #     common_path = os.path.join(checkpoints_path, str(iteration))
+        #     if not pipeline_parallel:
+        #         common_path = os.path.join(common_path,
+        #                             f'mp_rank_{tensor_rank:02d}.pth')
+        #     else:
+        #         common_path = os.path.join(common_path,
+        #                         f'mp_rank_{tensor_rank:02d}_{pipeline_rank:03d}.pth')
+        #     # ensure_directory_exists(common_path)
+        #     # torch.save(pbuf_view_items, common_path)
+        #     print_rank_0(f'model state pre gather saved succeed {len(pbuf_view_items)}')
         # Copy from param buffer to each param.
         for model_id, model in enumerate(self.models):
             for dtype, param_map in model.grad_buffer_param_index_map.items():
@@ -894,7 +934,18 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
                     param.view(-1).detach().copy_(param_buf_shard)
 
         timers('params-all-gather').stop()
-
+        # if iteration % save_interval == 0:
+        #     model = self.models[0]
+        #     common_path = os.path.join(checkpoints_path, str(iteration))
+        #     if not pipeline_parallel:
+        #         common_path = os.path.join(common_path,
+        #                             f'mp_rank_{tensor_rank:02d}_post.pth')
+        #     else:
+        #         common_path = os.path.join(common_path,
+        #                         f'mp_rank_{tensor_rank:02d}_{pipeline_rank:03d}_post.pth')
+        #     # ensure_directory_exists(common_path)
+        #     # torch.save(model.state_dict(), common_path)
+        #     # print_rank_0('model state post gather saved succeed')
 
     def _collect_main_grad_data_for_unscaling(self):
         """

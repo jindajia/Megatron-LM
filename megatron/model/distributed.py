@@ -77,9 +77,30 @@ class Bucket:
             self.allreduce_handle is None and not self.allreduce_issued
         ), 'Should not have multiple all-reduces in flight at once'
         self.data /= self.data_parallel_size
+
+        # Save data to disk
+        if iteration % save_interval == 0:
+            model = self.models[0]
+            common_path = os.path.join(checkpoints_path, str(iteration))
+            if not pipeline_parallel:
+                common_path = os.path.join(common_path,
+                                    f'mp_rank_{tensor_rank:02d}.pth')
+            else:
+                common_path = os.path.join(common_path,
+                                f'mp_rank_{tensor_rank:02d}_{pipeline_rank:03d}.pth')
+            # ensure_directory_exists(common_path)
+            # torch.save(pbuf_view_items, common_path)
+            print_rank_0(f'model state pre gather saved succeed {len(pbuf_view_items)}')
+
+        if torch.distributed.is_initialized():
+            if torch.distributed.get_rank() == 0:
+                print(f"JINDA_DEBUG.distributed.data.pre shape {self.data.shape}")
         self.allreduce_handle = torch.distributed.all_reduce(
             self.data, group=self.data_parallel_group, async_op=self.overlap_grad_reduce
         )  # Use async_op only when overlap_grad_reduce is True.
+        if torch.distributed.is_initialized():
+            if torch.distributed.get_rank() == 0:
+                print(f"JINDA_DEBUG.distributed.data.post shape {self.data.shape}")
         self.allreduce_issued = True
 
     def set(self, param: torch.nn.Parameter):
@@ -292,6 +313,8 @@ class DistributedDataParallel(DistributedDataParallelBase):
         grad_dtype_to_numel = {}
         param_to_name = {}
         for name, param in self.module.named_parameters():
+            # if torch.distributed.get_rank() == 0:
+            #     print(f"JINDA_DEBUG.DistributedDataParallel named_parameters name: {name} param: {param.shape}")
             if param.requires_grad:
                 param.grad_added_to_main_grad = False
                 param_to_name[param] = name
@@ -365,6 +388,9 @@ class DistributedDataParallel(DistributedDataParallelBase):
                         param.grad is not None
                     ), 'param.grad being None is not safe when overlap_grad_reduce is True'
                 if param.grad is not None and not param.grad_added_to_main_grad:
+                    # if torch.distributed.is_initialized():
+                    #     if torch.distributed.get_rank() == 0:
+                    #         print(f"JINDA_DEBUG.distributed.param_hook main_grad shape: {param.main_grad.shape}")
                     param.main_grad.add_(param.grad.data)
                 param.grad = None
                 if self.overlap_grad_reduce:
