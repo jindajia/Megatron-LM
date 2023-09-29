@@ -1,0 +1,86 @@
+***Full Model without Parallel***
+===========================================================================================================
+Layer                                      Param.(shape)           Param.(Mem. MB)  Act.(Mem. MB)        
+----------------------------------------------------------------------------------------------------------
+GPTModel                                                         
+├─TransformerLanguageModel                 
+│    └─Embedding                                                    	               	15.0           	
+│    │    └─word_embeddings                w=[50304,1280]           	122.8          	  
+│    │    └─position_embeddings            w=[1024,1280]            	2.5            	
+│    └─ParallelTransformer: X 36(layer_num)                                        	206.0/layer    	
+│    │    └─input_layernorm                w=[1280],b=[1280]        	0.0            	10.0           	
+│    │    └─self_attention                                          	               	60.0           	
+│    │    |     └─query_key_value          w=[3840,1280],b=[1280]   	9.4            	
+│    │    |     └─rearrange                                         	               	30.0           	
+│    │    |     └─core_attention_flash                              	               	10.0           	
+│    │    |     └─rearrange                                         	               	10.0           	
+│    │    |     └─dense                    w=[1280,1280],b=[1280]   	3.1            	10.0           	
+│    │    └─post_attention_layernorm       w=[1280],b=[1280]        	0.0            	10.0           	
+│    │    └─mlp                                                     	               	116.0          	
+│    │    |     └─dense_h_to_4h            w=[6784,1280],b=[6784]   	16.6           	
+│    │    |     └─bias_glue                                         	               	106.0          	
+│    │    |     └─dense_4h_to_h            w=[1280,3392],b=[1280]   	8.3            	10.0           	
+│    │    └─drop_add_fusion                                         	               	15.0           	
+-----------------------------------------------------------------------------------------------------------
+Amount of Parameters: 771,106,304  
+Parameters: 1.4GB
+Gradients: 1.4GB
+Optimizers(Adam) States: 11.5GB
+Activations: 9.0GB
+Total memory demand: 23.3GB
+==============================================================================================================
+
+
+***Cluster Communication Summary***
+==============================
+Pipeline Parallelism
+│    └─frequency/iteration: 0
+│    └─volume/iteration: 0.0 GB
+Data Parallelism
+│    └─frequency/iteration: 2
+│    └─volume/iteration: 2.9 GB
+Tensor Parallelism
+│    └─frequency/iteration: 0
+│    └─volume/iteration: 0.0 GB
+All Communication
+│    └─frequency/iteration: 2
+│    └─volume/iteration: 2.9 GB
+==============================
+
+
+***Memory demand on each GPU in the cluster***
+==============================
+Amount of Parameters: 771,106,304  
+Parameters: 1.4GB
+Gradients: 1.4GB
+Optimizers(Adam) States: 5.7GB
+Activations: 7.3GB
+Memory Requirement: 16.6GB
+==============================
+
+
+***Data Parallel Communications***
+========================================================================================
+GPTModel                                                         
+├─each iteration                
+│    └─synchronize_gradient                                         
+│    │    └─1 Data Parallel Groups 
+│    │    │    └─[n0_g0 n0_g1]
+│    │    └─communication 
+│    │    │    └─volume: 1.4GB
+│    │    │    └─func: reduce_scatter (using DistributedOptimizer) 
+│    │    └─frequency/iteration: 1
+│    │    └─location: after forward_and_backward_compute * 2 times/iteration 
+│    └─gather_model_param (using DistributedOptimizer)                                          
+│    │    └─1 Data Parallel Groups 
+│    │    │    └─[n0_g0 n0_g1]
+│    │    └─communication on each gpu
+│    │    │    └─volume: 1.4GB
+│    │    │    └─func: all_gather
+│    │    └─frequency/iteration: 1
+│    │    └─location: after optimizer.iteration
+----------------------------------------------------------------------------------------
+All Communication of Cluster in Data Parallelism
+│    └─frequency/iteration: 2
+│    └─volume/iteration: 2.9GB
+========================================================================================
