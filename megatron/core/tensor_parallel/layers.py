@@ -264,6 +264,7 @@ def linear_with_frozen_weight(
     gradient_accumulation_fusion: bool,
     async_grad_allreduce: bool,
     sequence_parallel: bool,
+    timers = None,
 ) -> torch.Tensor:
     """Linear layer execution with weight.requires_grad == False.
 
@@ -319,12 +320,14 @@ class LinearWithGradAccumulationAndAsyncCommunication(torch.autograd.Function):
         gradient_accumulation_fusion,
         async_grad_allreduce,
         sequence_parallel,
+        timers = None,
     ):
         ctx.save_for_backward(input, weight)
         ctx.use_bias = bias is not None
         ctx.gradient_accumulation_fusion = gradient_accumulation_fusion
         ctx.async_grad_allreduce = async_grad_allreduce
         ctx.sequence_parallel = sequence_parallel
+        ctx.timers = timers
 
         if sequence_parallel:
             world_size = get_tensor_model_parallel_world_size()
@@ -349,7 +352,7 @@ class LinearWithGradAccumulationAndAsyncCommunication(torch.autograd.Function):
     def backward(ctx, grad_output):
         input, weight = ctx.saved_tensors
         use_bias = ctx.use_bias
-
+        timers = ctx.timers
         if ctx.sequence_parallel:
             world_size = get_tensor_model_parallel_world_size()
             dim_size = list(input.size())
@@ -384,10 +387,14 @@ class LinearWithGradAccumulationAndAsyncCommunication(torch.autograd.Function):
         )
 
         if ctx.async_grad_allreduce:
+            if timers is not None:
+                timers('tensor-all-reduce-backward', log_level=2).start()
             # Asynchronous all-reduce
             handle = torch.distributed.all_reduce(
                 grad_input, group=get_tensor_model_parallel_group(), async_op=True
             )
+            if timers is not None:
+                timers('tensor-all-reduce-backward').stop()
             # Here we rely on CUDA_DEVICE_MAX_CONNECTIONS=1 to ensure that the
             # all-reduce is scheduled before the weight gradient computation
 
@@ -441,7 +448,7 @@ class LinearWithGradAccumulationAndAsyncCommunication(torch.autograd.Function):
         if ctx.async_grad_allreduce:
             handle.wait()
 
-        return grad_input, grad_weight, grad_bias, None, None, None
+        return grad_input, grad_weight, grad_bias, None, None, None, None
 
 
 def linear_with_grad_accumulation_and_async_allreduce(
@@ -451,6 +458,7 @@ def linear_with_grad_accumulation_and_async_allreduce(
     gradient_accumulation_fusion: bool,
     async_grad_allreduce: bool,
     sequence_parallel: bool,
+    timers = None,
 ) -> torch.Tensor:
     """Linear layer execution with asynchronous communication and
     gradient accumulation fusion in backprop.
@@ -511,6 +519,7 @@ def linear_with_grad_accumulation_and_async_allreduce(
         gradient_accumulation_fusion,
         async_grad_allreduce,
         sequence_parallel,
+        timers,
     ]
 
     if not linear_with_grad_accumulation_and_async_allreduce.warned:
@@ -737,6 +746,7 @@ class ColumnParallelLinear(torch.nn.Module):
             gradient_accumulation_fusion=self.gradient_accumulation_fusion,
             async_grad_allreduce=self.async_tensor_model_parallel_allreduce,
             sequence_parallel=self.sequence_parallel,
+            timers=self.config.timers
         )
         if self.gather_output:
             # All-gather across the partitions.
@@ -897,13 +907,22 @@ class RowParallelLinear(torch.nn.Module):
             gradient_accumulation_fusion=self.gradient_accumulation_fusion,
             async_grad_allreduce=False,
             sequence_parallel=False,
+            timers=None,
         )
 
         # All-reduce across all the partitions.
         if self.sequence_parallel:
+            if self.config.timers is not None:
+                self.config.timers('tensor-reduce-scatter-forward', log_level=2).start()
             output_ = reduce_scatter_to_sequence_parallel_region(output_parallel)
+            if self.config.timers is not None:
+                self.config.timers('tensor-reduce-scatter-forward').stop()
         else:
+            if self.config.timers is not None:
+                self.config.timers('tensor-all-reduce-forward', log_level=2).start()
             output_ = reduce_from_tensor_model_parallel_region(output_parallel)
+            if self.config.timers is not None:
+                self.config.timers('tensor-all-reduce-forward').stop()
         if not self.skip_bias_add:
             output = output_ + self.bias if self.bias is not None else output_
             output_bias = None

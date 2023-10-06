@@ -9,7 +9,7 @@ import time
 # The earliest we can measure the start time.
 _TRAIN_START_TIME = time.time()
 import torch
-
+import os
 from megatron import get_args
 from megatron import get_signal_handler
 from megatron import get_timers
@@ -280,10 +280,28 @@ def get_model(model_provider_func, model_type=ModelType.encoder_or_decoder, wrap
 
     # Print number of parameters.
     if mpu.get_data_parallel_rank() == 0:
-        print(' > number of parameters on (tensor, pipeline) '
-              'model parallel rank ({}, {}): {}'.format(
+        global_rank = torch.distributed.get_rank()
+        local_rank = global_rank % torch.cuda.device_count()
+        print(' > number of parameters on datarank 0: (tensor, pipeline) '
+              'model parallel rank (tensor_rank: {}, pipeline_rank: {}) (node: {}, local_rank: {}, global_rank: {}): {}'.format(
             mpu.get_tensor_model_parallel_rank(),
             mpu.get_pipeline_model_parallel_rank(),
+            int(os.environ.get('OMPI_COMM_WORLD_RANK') or 0),
+            local_rank,
+            global_rank,
+            sum([sum([p.nelement() for p in model_module.parameters()])
+                 for model_module in model])), flush=True)
+
+    if mpu.get_data_parallel_rank() == 1:
+        global_rank = torch.distributed.get_rank()
+        local_rank = global_rank % torch.cuda.device_count()
+        print(' > number of parameters on datarank 1: (tensor, pipeline) '
+              'model parallel rank (tensor_rank: {}, pipeline_rank: {}) (node: {}, local_rank: {}, global_rank: {}): {}'.format(
+            mpu.get_tensor_model_parallel_rank(),
+            mpu.get_pipeline_model_parallel_rank(),
+            int(os.environ.get('OMPI_COMM_WORLD_RANK') or 0),
+            local_rank,
+            global_rank,
             sum([sum([p.nelement() for p in model_module.parameters()])
                  for model_module in model])), flush=True)
 
@@ -544,7 +562,11 @@ def training_log(loss_dict, total_loss_dict, learning_rate, iteration,
         'optimizer-count-zeros',
         'optimizer-inner-step',
         'optimizer-copy-main-to-model-params',
-        'optimizer']
+        'optimizer',
+        'tensor-reduce-scatter-forward',
+        'tensor-all-reduce-forward',
+        'tensor-all-reduce-backward'
+        ]
 
     # Calculate batch size.
     batch_size = args.micro_batch_size * args.data_parallel_size * \
@@ -651,7 +673,7 @@ def training_log(loss_dict, total_loss_dict, learning_rate, iteration,
         if report_memory_flag and learning_rate > 0.:
             # Report memory after optimizer state has been initialized.
             report_memory('(after {} iterations)'.format(iteration))
-            report_memory_flag = False
+            # report_memory_flag = False
         timers.log(timers_to_log, normalizer=args.log_interval)
 
     return report_memory_flag
