@@ -784,8 +784,8 @@ class ParallelTransformerLayer(MegatronModule):
             layer_number,
             attention_type=AttnType.self_attn,
             attn_mask_type=self_attn_mask_type)
+        self.self_attention.dense.layer_info = (layer_number, 'SelfAttention',)
         if args.save_collective_data:
-            self.self_attention.dense.layer_info = (layer_number, 'SelfAttention',)
             self.self_attention.dense.tensor_model_parallel_rank = mpu.get_tensor_model_parallel_rank()
             self.self_attention.dense.save_collective_data = args.save_collective_data
             self.self_attention.dense.save_collective_data_path = args.save_collective_data_path
