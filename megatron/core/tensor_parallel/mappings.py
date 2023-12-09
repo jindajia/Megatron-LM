@@ -10,6 +10,8 @@ from megatron.core.parallel_state import (
 
 from .utils import split_tensor_along_last_dim
 
+import fbgemm_gpu.quantize_comm
+from megatron.quantize.quantize_method import reshape_to_2d
 
 def _reduce(input_):
     """All-reduce the input tensor across model parallel group."""
@@ -160,6 +162,82 @@ class _ReduceFromModelParallelRegion(torch.autograd.Function):
         return grad_output
 
 
+class _ReduceGatherFromModelParallelRegion(torch.autograd.Function):
+    """All-reduce the input from the model parallel region."""
+
+    @staticmethod
+    def symbolic(graph, input_):
+        rs_output = _reduce_scatter_along_first_dim(input_)
+        return _gather_along_first_dim(rs_output)
+    
+    @staticmethod
+    def forward(ctx, input_):
+        rs_output = _reduce_scatter_along_first_dim(input_)
+        return _gather_along_first_dim(rs_output)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        return grad_output
+
+class _ReduceGatherQuantizeFromModelParallelRegion(torch.autograd.Function):
+    """All-reduce the input from the model parallel region."""
+
+    @staticmethod
+    def symbolic(graph, input_):
+        """do reduce scatter on activations"""
+        reduce_scatter_output = _reduce_scatter_along_first_dim(input_)
+        """quantize tensor reduce scatter output into quantized tensor"""
+        dim_size = list(input_.size())
+        tensor_model_parallel_size = get_tensor_model_parallel_world_size()
+        assert (
+            dim_size[0] % tensor_model_parallel_size == 0
+        ), "First dimension of the tensor should be divisible by tensor parallel size"
+        dim_size[0] = dim_size[0] // tensor_model_parallel_size
+        qdim_size = list(reshape_to_2d(dim_size))
+        row_dim = qdim_size[-1]
+        input_2d = reduce_scatter_output.view((-1, row_dim)) if row_dim > 0 else reduce_scatter_output
+        quantized_tensor = torch.ops.fbgemm.FloatToFused8BitRowwiseQuantized(input_2d)
+        gather_output = _gather_along_first_dim(quantized_tensor)
+        dim_size = list(input_.size())
+        """dequantize tensor"""
+        assert (
+            gather_output.size(0) % tensor_model_parallel_size == 0
+        ), "gathered data has uneven data"
+        split_tensors = torch.split(gather_output, gather_output.size(0) // tensor_model_parallel_size, dim=0)
+        dequantized_tensors = [torch.ops.fbgemm.Fused8BitRowwiseQuantizedToHalf(q_tensor) for q_tensor in split_tensors]
+        output_ = torch.cat(dequantized_tensors, dim=0).view(dim_size)
+        return output_
+    
+    @staticmethod
+    def forward(ctx, input_):
+        """do reduce scatter on activations"""
+        reduce_scatter_output = _reduce_scatter_along_first_dim(input_)
+        """quantize tensor reduce scatter output into quantized tensor"""
+        dim_size = list(input_.size())
+        tensor_model_parallel_size = get_tensor_model_parallel_world_size()
+        assert (
+            dim_size[0] % tensor_model_parallel_size == 0
+        ), "First dimension of the tensor should be divisible by tensor parallel size"
+        dim_size[0] = dim_size[0] // tensor_model_parallel_size
+        qdim_size = list(reshape_to_2d(dim_size))
+        row_dim = qdim_size[-1]
+        input_2d = reduce_scatter_output.view((-1, row_dim)) if row_dim > 0 else reduce_scatter_output
+        quantized_tensor = torch.ops.fbgemm.FloatToFused8BitRowwiseQuantized(input_2d)
+        gather_output = _gather_along_first_dim(quantized_tensor)
+        dim_size = list(input_.size())
+        """dequantize tensor"""
+        assert (
+            gather_output.size(0) % tensor_model_parallel_size == 0
+        ), "gathered data has uneven data"
+        split_tensors = torch.split(gather_output, gather_output.size(0) // tensor_model_parallel_size, dim=0)
+        dequantized_tensors = [torch.ops.fbgemm.Fused8BitRowwiseQuantizedToHalf(q_tensor) for q_tensor in split_tensors]
+        output_ = torch.cat(dequantized_tensors, dim=0).view(dim_size)
+        return output_
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        return grad_output
+    
 class _ScatterToModelParallelRegion(torch.autograd.Function):
     """Split the input and keep only the corresponding chuck to the rank."""
 
@@ -262,6 +340,11 @@ def copy_to_tensor_model_parallel_region(input_):
 def reduce_from_tensor_model_parallel_region(input_):
     return _ReduceFromModelParallelRegion.apply(input_)
 
+def reduce_gather_based_reduce_from_tensor_model_parallel_region(input_):
+    return _ReduceGatherFromModelParallelRegion.apply(input_)
+
+def reduce_gather_quantize_based_reduce_from_tensor_model_parallel_region(input_):
+    return _ReduceGatherQuantizeFromModelParallelRegion.apply(input_)
 
 def scatter_to_tensor_model_parallel_region(input_):
     return _ScatterToModelParallelRegion.apply(input_)
