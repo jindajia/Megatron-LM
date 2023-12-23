@@ -277,6 +277,7 @@ def main():
         in_ss_out_names.append(file_names)
     else:
         in_file_names = glob.glob(args.input)
+        in_file_names.sort()
 
         # create .jsonl parition files
         for idx in range(args.partitions):

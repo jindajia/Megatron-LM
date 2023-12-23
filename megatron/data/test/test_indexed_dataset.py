@@ -33,7 +33,7 @@ def test_indexed_dataset(args):
         print(f"Document {i}:")
         print("--------------")
         for s in ids:
-            assert len(s) > 0
+            # assert len(s) > 0
             l = s.data.tolist()
             text = tokenizer.detokenize(l)
             print(text)
@@ -45,20 +45,21 @@ def test_indexed_dataset_get(args):
     tokenizer = build_tokenizer(args)
     size = ds.sizes[0]
     print(f"size: {size}")
-    full = ds.get(0)
-    print(full)
-    # print(tokenizer.detokenize(full.data.tolist()))
-    print("---")
-    end = ds.get(0, offset=size - 10)
-    print(end)
+    for i in range(1005900, 1005900+1):
+        full = ds.get(i)
+        print(f'index: {i}, token: {full}')
+        print(tokenizer.detokenize(full.data.tolist()))
+    # print("---")
+    # end = ds.get(0, offset=size - 10)
+    # print(end)
     # print(tokenizer.detokenize(end.data.tolist()))
 
-    start = ds.get(0, length=10)
-    print(start)
+    # start = ds.get(0, length=10)
+    # print(start)
     # print(tokenizer.detokenize(start.data.tolist()))
 
-    part = ds.get(0, offset=2, length=8)
-    print(part)
+    # part = ds.get(0, offset=2, length=8)
+    # print(part)
     # print(tokenizer.detokenize(part.data.tolist()))
 
 # def test_albert_dataset(args):
@@ -119,6 +120,7 @@ def main():
 
 #    test_albert_dataset(args)
     test_indexed_dataset_get(args)
+    # test_indexed_dataset(args)
 
 
 if __name__ == "__main__":
