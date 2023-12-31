@@ -14,6 +14,7 @@ from megatron.core import mpu, tensor_parallel
 from megatron.model.module import param_is_not_shared
 
 from .optimizer import MixedPrecisionOptimizer, _zero_grad_group_helper
+from torch import linalg as LA
 
 
 class Range:
@@ -871,22 +872,51 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
 
         data_parallel_rank = mpu.get_data_parallel_rank()
         data_parallel_group = mpu.get_data_parallel_group()
+        data_parallel_world_size = mpu.get_data_parallel_world_size()
 
-        # All-gather updated main params.
-        # - All param buffer views are guaranteed to have the same num elements
-        #   across all data parallel ranks, due to grad buffer padding that is
-        #   done in distributed.py, and extended to the param buffers. Thus,
-        #   all sub-views will have consistent start/end indexes across data
-        #   parallel ranks.
-        pbuf_view_items = self.get_model_param_buffer_dp_views()
-        for index, (model_index, dtype, pbuf, pbuf_views) \
-            in enumerate(pbuf_view_items):
+        # Check if QuantizeHelper is available and use it if enabled
+        if hasattr(self, 'quantize_helper') and self.quantize_helper.quantize_weights:
+            pbuf_view_items = self.get_model_param_buffer_dp_views()
+            for index, (model_index, dtype, pbuf, pbuf_views) in enumerate(pbuf_view_items):
+                # Only quantize the part of the buffer that this rank owns
+                shard = pbuf_views[data_parallel_rank]
+                quantized_shard, scales = self.quantize_helper.quantize(shard)
+                self.quantize_helper.allocate_buffer(pbuf.shape, torch.int8)
+                # All-gather for quantized parameters
+                torch.distributed._all_gather_base(
+                    self.quantize_helper.quantized_buffer,
+                    quantized_shard,
+                    group=data_parallel_group
+                )
 
-            torch.distributed._all_gather_base(
-                pbuf,
-                pbuf_views[data_parallel_rank],
-                group = data_parallel_group,
-            )
+                # Prepare buffer for all-gathered scales
+                all_scales = torch.empty(data_parallel_world_size * scales.numel(), dtype=scales.dtype, device=scales.device)
+
+                # All-gather for scales
+                torch.distributed._all_gather_base(
+                    all_scales,
+                    scales,
+                    group=data_parallel_group
+                )
+                # Dequantize the gathered buffer and update the parameters
+                self.quantize_helper.dequantize(self.quantize_helper.quantized_buffer, all_scales, pbuf)
+
+        else:
+            # All-gather updated main params.
+            # - All param buffer views are guaranteed to have the same num elements
+            #   across all data parallel ranks, due to grad buffer padding that is
+            #   done in distributed.py, and extended to the param buffers. Thus,
+            #   all sub-views will have consistent start/end indexes across data
+            #   parallel ranks.
+            pbuf_view_items = self.get_model_param_buffer_dp_views()
+            for index, (model_index, dtype, pbuf, pbuf_views) \
+                in enumerate(pbuf_view_items):
+
+                torch.distributed._all_gather_base(
+                    pbuf,
+                    pbuf_views[data_parallel_rank],
+                    group = data_parallel_group,
+                )
 
         # Copy from param buffer to each param.
         for model_id, model in enumerate(self.models):

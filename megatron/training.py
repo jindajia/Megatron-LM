@@ -40,6 +40,7 @@ from megatron.utils import calc_params_l2_norm
 from megatron.core.pipeline_parallel import get_forward_backward_func
 from megatron.utils import report_memory
 from megatron.model.vision.knn_monitor import compute_feature_bank
+from megatron.optimizer.distrib_optimizer import DistributedOptimizer
 
 
 def print_datetime(string):
@@ -380,6 +381,11 @@ def setup_model_and_optimizer(model_provider_func,
 
     optimizer = get_megatron_optimizer(model, no_wd_decay_cond,
                                        scale_lr_cond, lr_mult)
+    if isinstance(optimizer, DistributedOptimizer):
+        if args.quantized_weights or args.quantized_gradients:
+            from megatron.quantize_helper import QuantizeHelper
+            optimizer.quantize_helper = QuantizeHelper(quantize_weights=args.quantized_weights, quantize_gradients=args.quantized_gradients, bucket_size=args.quantized_bucket_size)
+
     opt_param_scheduler = get_optimizer_param_scheduler(optimizer)
 
     if args.load is not None:

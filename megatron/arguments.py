@@ -26,6 +26,7 @@ def parse_args(extra_args_provider=None, ignore_unknown_args=False):
     parser = _add_checkpointing_args(parser)
     parser = _add_mixed_precision_args(parser)
     parser = _add_distributed_args(parser)
+    parser = _add_quantize_args(parser)
     parser = _add_validation_args(parser)
     parser = _add_data_args(parser)
     parser = _add_autoresume_args(parser)
@@ -174,6 +175,11 @@ def validate_args(args, defaults={}):
         assert args.DDP_impl == 'local'
         assert args.use_contiguous_buffers_in_local_ddp
 
+    # If we use quantizer for weights or gradients, we need to use distributed optimizer.
+    if args.quantized_weights or args.quantized_gradients:
+        assert args.use_distributed_optimizer is True
+        print('using quantizaiton during training, bucket size = {}.'.format(args.quantized_bucket_size),
+              flush=True)
     # If we use the distributed optimizer, we need to have local DDP
     # and we should make sure use-contiguous-buffers-in-local-ddp is on.
     if args.use_distributed_optimizer:
@@ -988,6 +994,17 @@ def _add_distributed_args(parser):
     return parser
 
 
+def _add_quantize_args(parser):
+    group = parser.add_argument_group(title='quantized training')
+    group.add_argument('--quantized-weights', action='store_true',
+                       help='Quantize weights before all gather distributed weights. Only effecitve with distributed optimizer')
+    group.add_argument('--quantized-gradients', action='store_true',
+                       help='Quantize gradients before reduce scatter gradients. Only effecitve with distributed optimizer')
+    group.add_argument('--quantized-bucket-size', type=int, default=2048,
+                       help='Buckted size for quantization.')
+    
+    return parser
+    
 def _add_validation_args(parser):
     group = parser.add_argument_group(title='validation')
 
