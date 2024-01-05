@@ -524,6 +524,7 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
             for dtype, grad_buffer in model.grad_buffers.items():
                 size_ratio = torch.finfo(dtype).bits // torch.finfo(params_dtype).bits
                 current_param_buffers[dtype] = []
+                current_paramdiff_buffers[dtype] = []
                 for bucket in grad_buffer.buckets:
 
                     # Handle older/newer method for getting untyped storage.
@@ -1013,18 +1014,16 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
         in _reduce_scatter_base and _all_gather_base.
         """
 
-        data_parallel_world_size = mpu.get_data_parallel_world_size()
 
         # Buffer views.
         view_items = []
         for model_index, buffers in enumerate(model_buffers):
-            for dtype, buf in buffers.items():
-
-                assert buf.numel() % data_parallel_world_size == 0
-                shard_size = int(buf.numel() / data_parallel_world_size)
-                buf_views = [buf[(r*shard_size):((r+1)*shard_size)]
-                             for r in range(data_parallel_world_size)]
-                view_items.append((model_index, dtype, buf, buf_views))
+            view_items_per_model_chunk = []
+            for dtype, buf_for_all_buckets in buffers.items():
+                for bucket_index, buf in enumerate(buf_for_all_buckets):
+                    buf_views = shard_buffer(buf)
+                    view_items_per_model_chunk.insert(0, (model_index, dtype, bucket_index, buf, buf_views))
+            view_items.extend(view_items_per_model_chunk)
 
         return view_items
 
@@ -1038,8 +1037,8 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
         pbufdiff_view_items = self.get_model_paramdiff_buffer_dp_views()
         for index, (pbufs, pdbufs) \
             in enumerate(zip(pbuf_view_items, pbufdiff_view_items)):
-            model_index, dtype, pbuf, pbuf_views = pbufs
-            model_index, dtype, pdbuf, pdbuf_views = pdbufs
+            _, _, _, pbuf, _ = pbufs
+            _, _, _, pdbuf, _ = pdbufs
             if op == 'cache_model_params':
                 if pbuf2pdbuf:
                     pdbuf.copy_(pbuf)
@@ -1135,9 +1134,9 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
                         if _COMM_QUANT_REC_ERROR == 1 and idx == data_parallel_rank:
                             abs_diff = torch.norm(quant_copy - pbuf_views[data_parallel_rank], p=2)
                             rel_diff = abs_diff / torch.norm(quant_copy, p=2)
-                            print(("DEBUG: after allgather param, model_index: abs_diff and rel_diff and param norm: ", data_parallel_rank, model_index, abs_diff, rel_diff, torch.norm(quant_copy, p=2)), flush=True)
+                            print(f"DEBUG after allgather param... dp rank: {data_parallel_rank},  model_index: {model_index}, abs_diff: {abs_diff}, rel_diff: {rel_diff}, param norm: {torch.norm(quant_copy, p=2)}", flush=True)
                             rel_diff_wrt_original_param = abs_diff / torch.norm(quant_copy_original_param, p=2)
-                            print(("DEBUG: after allgather param, model_index: rel_diff wrt original param: ", data_parallel_rank, model_index, rel_diff_wrt_original_param), flush=True)
+                            print(f"DEBUG after allgather param... dp rank: {data_parallel_rank}, model_index: {model_index}, rel_diff wrt original param: {rel_diff_wrt_original_param}", flush=True)
 
                 if _COMM_QUANT_BITS_PARAMDIFF != -1:
                     self.param_diff_ops('calback_model_param')
@@ -1381,10 +1380,10 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
     def step(self, args, timers):
         # Copy from each param to paramdiff buffer
         for model_id, model in enumerate(self.models):
-            for dtype, param_map in model._grad_buffer_param_index_map.items():
-                for param, buf_range in param_map.items():
-                    paramdiff_buf = self.paramdiff_buffers[model_id][dtype]
-                    paramdiff_buf_shard = paramdiff_buf[buf_range[0]:buf_range[1]]
+            for dtype, param_map in model.grad_buffer_param_index_map.items():
+                for param, (param_start_index, param_end_index, bucket_id) in param_map.items():
+                    paramdiff_buf = self.paramdiff_buffers[model_id][dtype][bucket_id]
+                    paramdiff_buf_shard = paramdiff_buf[param_start_index:param_end_index]
                     paramdiff_buf_shard.copy_(param.view(-1))
 
         self.update_successful, grad_norm, num_zeros_in_grad = super().step(args, timers)
