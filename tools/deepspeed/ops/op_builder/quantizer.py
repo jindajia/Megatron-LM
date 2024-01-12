@@ -45,7 +45,7 @@ class CUDAQuantizer:
         if CUDAQuantizer.quantizer_cuda_module is None:
             CUDAQuantizer.quantizer_cuda_module = QuantizerBuilder().load()
 
-    def quantize(self, param, groups=None):
+    def quantize(self, param, groups=None, quantization_bits=4):
         if groups is None:
             try:
                 groups = self.group_size_cache[param.numel()]
@@ -68,9 +68,9 @@ class CUDAQuantizer:
                 assert param.numel(
                 ) > groups, f"Adaptive grouping algorithm cannot find a group size for input tensor of size {param.numel()}"
                 self.group_size_cache[param.numel()] = groups
-        return self.quantizer_cuda_module.quantize(param.to(get_accelerator().device_name()), groups, 8,
+        return self.quantizer_cuda_module.quantize(param.to(get_accelerator().device_name()), groups, quantization_bits,
                                                    self.quantizer_cuda_module.Symmetric)
 
-    def dequantize(self, quantized_param, scale):
-        return self.quantizer_cuda_module.dequantize(quantized_param, scale, scale.numel(), 8,
+    def dequantize(self, quantized_param, scale, quantization_bits=4):
+        return self.quantizer_cuda_module.dequantize(quantized_param, scale, scale.numel(), quantization_bits,
                                                      self.quantizer_cuda_module.Symmetric)

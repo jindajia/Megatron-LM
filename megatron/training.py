@@ -384,7 +384,7 @@ def setup_model_and_optimizer(model_provider_func,
     if isinstance(optimizer, DistributedOptimizer):
         if args.quantized_weights or args.quantized_gradients:
             from megatron.quantize_helper import QuantizeHelper
-            optimizer.quantize_helper = QuantizeHelper(quantize_weights=args.quantized_weights, quantize_gradients=args.quantized_gradients, bucket_size=args.quantized_bucket_size)
+            optimizer.quantize_helper = QuantizeHelper(quantize_weights=args.quantized_weights, weight_quantization_bits=args.weight_quantization_bits, wq_bucket_size=args.wq_bucket_size, quantize_gradients=args.quantized_gradients, gradeint_quantization_bits=args.gradeint_quantization_bits)
 
     opt_param_scheduler = get_optimizer_param_scheduler(optimizer)
 

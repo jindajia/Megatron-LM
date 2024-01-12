@@ -998,10 +998,14 @@ def _add_quantize_args(parser):
     group = parser.add_argument_group(title='quantized training')
     group.add_argument('--quantized-weights', action='store_true',
                        help='Quantize weights before all gather distributed weights. Only effecitve with distributed optimizer')
+    group.add_argument('--weight-quantization-bits', type=int, default=4,
+                       help='Weight quantization bits, only support 8 and 4 bits.')
+    group.add_argument('--wq-bucket-size', type=int, default=2048,
+                       help='Buckted size for weight quantization.')
     group.add_argument('--quantized-gradients', action='store_true',
                        help='Quantize gradients before reduce scatter gradients. Only effecitve with distributed optimizer')
-    group.add_argument('--quantized-bucket-size', type=int, default=2048,
-                       help='Buckted size for quantization.')
+    group.add_argument('--gradeint-quantization-bits', type=int, default=8,
+                       help='Gradients quantization bits, only support 8 and 4 bits, 4 bits gradients may have an accuracy drop.')
     
     return parser
     
