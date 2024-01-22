@@ -1382,8 +1382,10 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
         for model_id, model in enumerate(self.models):
             for dtype, param_map in model.grad_buffer_param_index_map.items():
                 for param, (param_start_index, param_end_index, bucket_id) in param_map.items():
+                    bucket_offset = model.grad_buffers[dtype].buckets[bucket_id].offset
                     paramdiff_buf = self.paramdiff_buffers[model_id][dtype][bucket_id]
-                    paramdiff_buf_shard = paramdiff_buf[param_start_index:param_end_index]
+                    paramdiff_buf_shard = paramdiff_buf.view(-1)[param_start_index-bucket_offset:param_end_index-bucket_offset]
+                    assert param.data.nelement() == paramdiff_buf_shard.nelement()
                     paramdiff_buf_shard.copy_(param.view(-1))
 
         self.update_successful, grad_norm, num_zeros_in_grad = super().step(args, timers)
