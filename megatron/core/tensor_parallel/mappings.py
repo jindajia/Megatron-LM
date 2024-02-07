@@ -88,7 +88,7 @@ def _gather_along_last_dim(input_):
     return output
 
 
-def _gather_along_first_dim(input_):
+def _gather_along_first_dim(input_, output=None):
     """Gather tensors and concatinate along the first dimension."""
 
     world_size = get_tensor_model_parallel_world_size()
@@ -96,24 +96,105 @@ def _gather_along_first_dim(input_):
     if world_size == 1:
         return input_
 
-    dim_size = list(input_.size())
-    dim_size[0] = dim_size[0] * world_size
+    if output is None:
+        dim_size = list(input_.size())
+        dim_size[0] = dim_size[0] * world_size
 
-    output = torch.empty(dim_size, dtype=input_.dtype, device=torch.cuda.current_device())
+        output = torch.empty(dim_size, dtype=input_.dtype, device=torch.cuda.current_device())
     torch.distributed._all_gather_base(
         output, input_.contiguous(), group=get_tensor_model_parallel_group()
     )
 
     return output
 
+def _all_to_all_along_first_dim(input_, output=None):
+    """All to All gather tensor"""
+    world_size = get_tensor_model_parallel_world_size()
+    if world_size == 1:
+        return input_
+    dim_size = list(input_.size())
+    assert (
+        dim_size[0] % world_size == 0
+    ), "First dimension of the tensor should be divisible by tensor parallel size"
 
-def _reduce_scatter_along_first_dim(input_):
+    # Prepare output tensor
+    if output is None:
+        dim_size = list(input_.size())
+        output = torch.empty(dim_size, dtype=input_.dtype, device=torch.cuda.current_device())
+    
+    # Perform the all_to_all_single operation
+    torch.distributed.all_to_all_single(output, input_, group=get_tensor_model_parallel_group())
+    return output
+
+def all_to_all_reduce_scatter_along_first_dim(input_, output=None):
+    """Reduce-scatter the input tensor across model parallel group using all_to_all_single."""
+    world_size = get_tensor_model_parallel_world_size()
+    if world_size == 1:
+        return input_
+    dim_size = list(input_.size())
+    assert (
+        dim_size[0] % world_size == 0
+    ), "First dimension of the tensor should be divisible by tensor parallel size"
+
+    # Prepare output tensor
+    scatter_size_per_dim = dim_size[0] // world_size
+    dim_size[0] = scatter_size_per_dim
+    input_split = list(input_.split(scatter_size_per_dim, dim=0))
+    output_list = [torch.empty_like(input_split[0]) for _ in range(world_size)]
+    
+    # Perform the all_to_all_single operation
+    torch.distributed.all_to_all(output_list, input_split, group=get_tensor_model_parallel_group())
+    output = torch.stack(output_list).sum(dim=0)
+
+    return output
+
+def _reduce_scatter_along_first_dim(input_, output=None):
     """Reduce-scatter the input tensor across model parallel group."""
     world_size = get_tensor_model_parallel_world_size()
     # Bypass the function if we are using only 1 GPU.
     if world_size == 1:
         return input_
 
+    if output is None:
+        dim_size = list(input_.size())
+        assert (
+            dim_size[0] % world_size == 0
+        ), "First dimension of the tensor should be divisible by tensor parallel size"
+
+        dim_size[0] = dim_size[0] // world_size
+        output = torch.empty(dim_size, dtype=input_.dtype, device=torch.cuda.current_device())
+    torch.distributed._reduce_scatter_base(
+        output, input_.contiguous(), group=get_tensor_model_parallel_group()
+    )
+    return output
+
+def _reduce_scatter_along_last_dim(input_):
+    """Reduce-scatter the input tensor across model parallel group along last dimension."""
+    world_size = get_tensor_model_parallel_world_size()
+    # Bypass the function if we are using only 1 GPU.
+    if world_size == 1:
+        return input_
+    
+    dim_size = list(input_.size())
+    assert (
+        dim_size[-1] % world_size == 0
+    ), "Last dimension of the tensor should be divisible by tensor parallel size"
+
+    dim_size[-1] = dim_size[-1] // world_size
+
+    output = torch.empty(dim_size, dtype=input_.dtype, device=torch.cuda.current_device())
+    torch.distributed._reduce_scatter_base(
+        output, input_.contiguous(), group=get_tensor_model_parallel_group()
+    )
+    return output
+
+def _reduce_scatter_with_all_gather(input_):
+    """Reduce-scatter + All-gather the input tensor across model parallel group."""
+    world_size = get_tensor_model_parallel_world_size()
+    # Bypass the function if we are using only 1 GPU.
+    if world_size == 1:
+        return input_
+    # print("JINDA_DEBUG", input_.shape)
     dim_size = list(input_.size())
     assert (
         dim_size[0] % world_size == 0
@@ -125,8 +206,12 @@ def _reduce_scatter_along_first_dim(input_):
     torch.distributed._reduce_scatter_base(
         output, input_.contiguous(), group=get_tensor_model_parallel_group()
     )
-    return output
 
+    input_ = output.clone().continuous()
+    torch.distributed._all_gather_base(
+        output, input_, group=get_tensor_model_parallel_group()
+    )
+    return output
 
 class _CopyToModelParallelRegion(torch.autograd.Function):
     """Pass the input to the model parallel region."""
@@ -153,6 +238,8 @@ class _ReduceFromModelParallelRegion(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, input_):
+        input_ = _reduce_scatter_along_first_dim(input_)
+        return _gather_along_first_dim(input_)
         return _reduce(input_)
 
     @staticmethod

@@ -821,6 +821,7 @@ class RowParallelLinear(torch.nn.Module):
         self.config = config
         self.gradient_accumulation_fusion = config.gradient_accumulation_fusion
         self.sequence_parallel = config.sequence_parallel
+        self.save_collective_data = False
         if self.sequence_parallel and not self.input_is_parallel:
             raise RuntimeError("To enable `sequence_parallel`, `input_is_parallel` must be `True`")
 
