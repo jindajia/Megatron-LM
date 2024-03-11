@@ -555,44 +555,43 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
         #   dtype size is always <= grad dtype size.
         self.param_buffers = []
         self.paramdiff_buffers = []
-        for model_index, model in enumerate(self.models):
-            current_param_buffers = {}
-            current_paramdiff_buffers = {}
-            for dtype, grad_buffer in model.grad_buffers.items():
-                size_ratio = torch.finfo(dtype).bits // torch.finfo(params_dtype).bits
-                current_param_buffers[dtype] = []
-                current_paramdiff_buffers[dtype] = []
-                for bucket in grad_buffer.buckets:
 
-                    # Handle older/newer method for getting untyped storage.
+        for gbuf_index, grad_buffer in enumerate(self.grad_buffers):
+            dtype = grad_buffer.dtype
+            size_ratio = torch.finfo(dtype).bits // torch.finfo(params_dtype).bits
+            current_param_buffers = []
+            current_paramdiff_buffers = []
+            for bucket in grad_buffer.buckets:
+
+                # Handle older/newer method for getting untyped storage.
+                try:
+                    storage = bucket.data.untyped_storage()
+                except:
                     try:
-                        storage = bucket.data.untyped_storage()
+                        storage = bucket.data.storage()._untyped()
                     except:
-                        try:
-                            storage = bucket.data.storage()._untyped()
-                        except:
-                            storage = bucket.data.storage().untyped()
+                        storage = bucket.data.storage().untyped()
 
-                    # Typed param buffer.
-                    param_buffer = torch.tensor(storage, dtype=params_dtype, device=bucket.data.device)
+                # Typed param buffer.
+                param_buffer = torch.tensor(storage, dtype=params_dtype, device=bucket.data.device)
 
-                    # .storage() ignores views / slices, so param_buffer now points to the start
-                    # of the grad_buffer instead of to the start of each bucket. As a result,
-                    # add bucket.offset to make sure param_buffers point to the right region of
-                    # memory.
-                    # Since we want the start of each bucket's param_buffer to coincide with the
-                    # start of the same bucket's grad_buffer (this ensures that zeroing the grad
-                    # buffer does not zero out params in the param_buffer before they are copied
-                    # into the model_params), multiply the offset by the size ratio of grads and
-                    # params.
-                    offset = bucket.offset * size_ratio
-                    param_buffer = param_buffer[offset:offset+bucket.data.numel()]
-                    assert param_buffer.data_ptr() == bucket.data.data_ptr(), \
-                        "param_buffer and grad_buffer for same bucket should start at the same byte address"
-                    assert param_buffer.numel() == bucket.data.numel(), \
-                        "param_buffer and grad_buffer for same bucket should have the same number of elements"
-                    current_param_buffers[dtype].append(param_buffer)
-                    current_paramdiff_buffers[dtype].append(torch.zeros_like(param_buffer))
+                # .storage() ignores views / slices, so param_buffer now points to the start
+                # of the grad_buffer instead of to the start of each bucket. As a result,
+                # add bucket.offset to make sure param_buffers point to the right region of
+                # memory.
+                # Since we want the start of each bucket's param_buffer to coincide with the
+                # start of the same bucket's grad_buffer (this ensures that zeroing the grad
+                # buffer does not zero out params in the param_buffer before they are copied
+                # into the model_params), multiply the offset by the size ratio of grads and
+                # params.
+                offset = bucket.offset * size_ratio
+                param_buffer = param_buffer[offset:offset+bucket.data.numel()]
+                assert param_buffer.data_ptr() == bucket.data.data_ptr(), \
+                    "param_buffer and grad_buffer for same bucket should start at the same byte address"
+                assert param_buffer.numel() == bucket.data.numel(), \
+                    "param_buffer and grad_buffer for same bucket should have the same number of elements"
+                current_param_buffers.append(param_buffer)
+                current_paramdiff_buffers.append(torch.zeros_like(param_buffer))
             self.param_buffers.append(current_param_buffers)
             self.paramdiff_buffers.append(current_paramdiff_buffers)
 
@@ -1122,10 +1121,10 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
         view_items = []
         for model_index, buffers in enumerate(model_buffers):
             view_items_per_model_chunk = []
-            for dtype, buf_for_all_buckets in buffers.items():
-                for bucket_index, buf in enumerate(buf_for_all_buckets):
-                    buf_views = shard_buffer(buf)
-                    view_items_per_model_chunk.insert(0, (model_index, dtype, bucket_index, buf, buf_views))
+            for bucket_index, buf in enumerate(buffers):
+                dtype = buf.dtype
+                buf_views = shard_buffer(buf)
+                view_items_per_model_chunk.insert(0, (model_index, dtype, bucket_index, buf, buf_views))
             view_items.extend(view_items_per_model_chunk)
 
         return view_items
@@ -1173,7 +1172,7 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
             # start / end indexes across data-parallel ranks.
 
             (model_index, dtype, bucket_index, pbuf, pbuf_views) = self.pbuf_view_items[all_gather_handle_index]
-            assert all_gather_handle_index == len(self.all_gather_handles)
+            assert all_gather_handle_index < len(self.all_gather_handles)
 
             if _COMM_QUANT_BITS_PARAMDIFF != -1:
                 self.param_diff_ops('cal_model_paramdiff') 
@@ -1252,7 +1251,7 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
                     group = data_parallel_group,
                     async_op = self.overlap_param_gather
                 )
-            self.all_gather_handles.append(all_gather_handle)
+            self.all_gather_handles[all_gather_handle_index] = all_gather_handle
             assert self.all_gather_handle_index_to_bucket_index_map[all_gather_handle_index] == \
                 (model_index, dtype, bucket_index)
             self.param_buffer_copied.append(False)
@@ -1475,14 +1474,14 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
     @torch.no_grad()
     def step(self, args, timers):
         # Copy from each param to paramdiff buffer
-        for model_id, model in enumerate(self.models):
-            for dtype, param_map in model.grad_buffer_param_index_map.items():
-                for param, (param_start_index, param_end_index, bucket_id) in param_map.items():
-                    bucket_offset = model.grad_buffers[dtype].buckets[bucket_id].offset
-                    paramdiff_buf = self.paramdiff_buffers[model_id][dtype][bucket_id]
-                    paramdiff_buf_shard = paramdiff_buf.view(-1)[param_start_index-bucket_offset:param_end_index-bucket_offset]
-                    assert param.data.nelement() == paramdiff_buf_shard.nelement()
-                    paramdiff_buf_shard.copy_(param.view(-1))
+        for gbuf_index, grad_buffer in enumerate(self.grad_buffers):
+            dtype = grad_buffer.dtype
+            for param, (param_start_index, param_end_index, bucket_id) in grad_buffer.param_index_map.items():
+                bucket_offset = grad_buffer.buckets[bucket_id].offset
+                paramdiff_buf = self.paramdiff_buffers[gbuf_index][bucket_id]
+                paramdiff_buf_shard = paramdiff_buf.view(-1)[param_start_index-bucket_offset:param_end_index-bucket_offset]
+                assert param.data.nelement() == paramdiff_buf_shard.nelement()
+                paramdiff_buf_shard.copy_(param.view(-1))
 
         self.update_successful, grad_norm, num_zeros_in_grad = super().step(args, timers)
 
