@@ -31,6 +31,7 @@ def parse_args(extra_args_provider=None, ignore_unknown_args=False):
     parser = _add_checkpointing_args(parser)
     parser = _add_mixed_precision_args(parser)
     parser = _add_distributed_args(parser)
+    parser = _add_quantize_args(parser)
     parser = _add_validation_args(parser)
     parser = _add_data_args(parser)
     parser = _add_autoresume_args(parser)
@@ -167,6 +168,15 @@ def validate_args(args, defaults={}):
             print('WARNING: Setting args.overlap_p2p_comm to False since non-interleaved '
                   'schedule does not support overlapping p2p communication')
 
+    # If we use quantizer for weights or gradients, we need to use distributed optimizer.
+    if args.quantized_weights or args.quantized_gradients:
+        assert args.use_distributed_optimizer is True, 'Quantization only support Distributed Optimizer'
+        if args.quantized_weights and args.rank == 0:
+            print(f'Weight Quantization: True, group size = {args.wq_group_size}, bits = {args.weight_quantization_bits}', flush=True)
+        if args.quantized_gradients and args.rank == 0:
+            print(f'Gradient Quantization: True, gradient quantization intra-node group size = {args.gq_group_size_intra}, bits = {args.gradient_quantization_bits_intra}; inter-node group size = {args.gq_group_size_inter}, bits = {args.gradient_quantization_bits_inter}.',
+                flush=True)
+        
     if args.overlap_param_gather:
         assert args.use_distributed_optimizer, \
             '--overlap-param-gather only supported with distributed optimizer'
@@ -1179,6 +1189,30 @@ def _add_distributed_args(parser):
                        'setting `min_ctas`, `max_ctas`, and `cga_cluster_size`.')
     return parser
 
+def _add_quantize_args(parser):
+    group = parser.add_argument_group(title='quantized training')
+    group.add_argument('--quantized-weights', action='store_true',
+                       help='Quantize weights before all gather distributed weights. Only effecitve with distributed optimizer')
+    group.add_argument('--weight-quantization-bits', type=int, default=4,
+                       help='Weight quantization bits, only support 8 and 4 bits.')
+    group.add_argument('--wq-group-size', type=int, default=2048,
+                       help='Group size for weight quantization.')
+    group.add_argument('--quantized-gradients', action='store_true',
+                       help='Quantize gradients before reduce scatter gradients. Only effecitve with distributed optimizer')
+    group.add_argument('--gradient-quantization-bits-inter', type=int, default=4,
+                       help='Gradients quantization bits for inter-node gpus, only support 8 and 4 bits, 4 bits gradients may have an accuracy drop.')
+    group.add_argument('--gq-group-size-inter', type=int, default=128,
+                       help='Group size for inter-node gpus gradient quantization.')
+    group.add_argument('--gradient-quantization-bits-intra', type=int, default=8,
+                       help='Gradients quantization bits for intra-node gpus, only support 8 and 4 bits, 4 bits gradients may have an accuracy drop.')
+    group.add_argument('--gq-group-size-intra', type=int, default=512,
+                       help='Group size for intra-node gpus gradient quantization.')
+    group.add_argument('--gradients-quantization-start-iteration', type=int, default=0,
+                       help='Gradient quantization strat after this iteration.')
+    group.add_argument('--hadamard-transform', action='store_true',
+                       default=False,
+                       help='Hadamard Transformation before gradient reduction to decrease quantization error')
+    return parser
 
 def _add_validation_args(parser):
     group = parser.add_argument_group(title='validation')

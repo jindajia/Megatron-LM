@@ -49,7 +49,7 @@ from megatron.utils import calc_params_l2_norm
 from megatron.core.pipeline_parallel import get_forward_backward_func
 from megatron.utils import report_memory
 from megatron.model.vision.knn_monitor import compute_feature_bank
-
+from .quantization_helper import QuantizationHelper
 
 def print_datetime(string):
     """Note that this call will sync across all ranks."""
@@ -389,6 +389,21 @@ def get_model(model_provider_func, model_type=ModelType.encoder_or_decoder, wrap
     if args.fp16 or args.bf16:
         model = [Float16Module(model_module, args) for model_module in model]
 
+    quantize_helper = None
+    if args.quantized_weights or args.quantized_gradients:
+        quantize_helper = QuantizationHelper(quantized_weights=args.quantized_weights, 
+                                                    weight_quantization_bits=args.weight_quantization_bits, 
+                                                    wq_group_size=args.wq_group_size, 
+                                                    quantized_gradients=args.quantized_gradients, 
+                                                    gradient_quantization_bits_inter=args.gradient_quantization_bits_inter,
+                                                    gq_group_size_inter=args.gq_group_size_inter,
+                                                    gradient_quantization_bits_intra=args.gradient_quantization_bits_intra,
+                                                    gq_group_size_intra=args.gq_group_size_intra,
+                                                    data_parallel_group=mpu.get_data_parallel_group(with_context_parallel=True),
+                                                    tensor_parallel_group=mpu.get_tensor_model_parallel_group(),
+                                                    pipeline_parallel_group=mpu.get_pipeline_model_parallel_group(),
+                                                    hadamard_transform=args.hadamard_transform)
+
     if wrap_with_ddp:
         config = get_model_config(model[0])
         model = [DDP(config,
@@ -399,7 +414,8 @@ def get_model(model_provider_func, model_type=ModelType.encoder_or_decoder, wrap
                      use_distributed_optimizer=args.use_distributed_optimizer,
                      # Turn off bucketing for model_chunk 2 onwards, since communication for these
                      # model chunks is overlapped with compute anyway.
-                     disable_bucketing=(model_chunk_idx > 0))
+                     disable_bucketing=(model_chunk_idx > 0),
+                     quantization_helper=quantize_helper)
                  for (model_chunk_idx, model_chunk) in enumerate(model)]
 
         # Broadcast params from data parallel src rank to other data parallel ranks.
@@ -473,6 +489,8 @@ def setup_model_and_optimizer(model_provider_func,
 
     optimizer = get_megatron_optimizer(model, no_wd_decay_cond,
                                        scale_lr_cond, lr_mult)
+    if hasattr(model[0], 'quantization_helper'):
+        optimizer.quantize_helper = model[0].quantization_helper
     opt_param_scheduler = get_optimizer_param_scheduler(optimizer)
 
     if args.load is not None:
@@ -851,6 +869,9 @@ def train(forward_step_func, model, optimizer, opt_param_scheduler,
     # Setup some training config params
     config.grad_scale_func = optimizer.scale_loss
     config.timers = timers
+    quantize_helper:QuantizationHelper = None
+    if isinstance(model[0], DDP) and hasattr(model[0], 'quantization_helper'):
+        quantize_helper = model[0].quantization_helper
     if isinstance(model[0], DDP) and args.overlap_grad_reduce:
         assert config.no_sync_func is None, \
             ('When overlap_grad_reduce is True, config.no_sync_func must be None; '
@@ -904,6 +925,8 @@ def train(forward_step_func, model, optimizer, opt_param_scheduler,
         update_num_microbatches(args.consumed_train_samples, consistency_check=True)
 
         args.curr_iteration = iteration
+        if quantize_helper is not None:
+            quantize_helper.set_gradient_quantization(iteration >= args.gradients_quantization_start_iteration and args.quantized_gradients)
         loss_dict, skipped_iter, grad_norm, num_zeros_in_grad = \
             train_step(forward_step_func,
                        train_data_iterator,
