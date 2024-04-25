@@ -1017,7 +1017,7 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
             self.all_gather_events[all_gather_event_index] = torch.cuda.Event()
             grad_buffer = self.grad_buffers[gbuf_index]
             stream = grad_buffer.buckets[bucket_index].comm_stream
-            torch.cuda.synchronize()
+            stream.wait_stream(torch.cuda.default_stream())
             with torch.cuda.stream(stream):
                 if self.quantize_helper is not None and self.quantize_helper.quantized_weights:
                     data_parallel_world_size = mpu.get_data_parallel_world_size()
@@ -1054,7 +1054,7 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
             if not async_op and self.all_gather_events[all_gather_event_index] is not None:
                 self.all_gather_events[all_gather_event_index].synchronize()
                 self.all_gather_events[all_gather_event_index] = None
-                stream.synchronize()
+                torch.cuda.current_stream().wait_stream(stream)
             assert self.all_gather_event_index_to_bucket_index_map[all_gather_event_index] == \
                 (gbuf_index, dtype, bucket_index)
             self.param_buffer_copied.append(False)
