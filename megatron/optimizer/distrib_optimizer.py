@@ -1191,7 +1191,9 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
         buffer, this method is responsible for copying the updated grads
         from the grad buffer to the main shard's grad field.
         """
-
+        # BUGFIX for quantization padding, should set parambuffer to zero before all gather and quantization
+        for (model_index, dtype, bucket_index, pbuf, pbuf_views) in self.pbuf_view_items:
+            pbuf.zero_()
         # Utility method for copying group grads.
         def copy_group_grads(model_groups, shard_main_groups):
             for model_group, shard_main_group in zip(model_groups, shard_main_groups):
