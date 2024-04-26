@@ -7,7 +7,7 @@ from apex.optimizers import FusedAdam as Adam
 import math
 import torch
 import itertools
-
+import os
 from megatron import get_args
 from megatron import get_timers
 from megatron import print_rank_0
@@ -16,6 +16,70 @@ from megatron.core import mpu, tensor_parallel
 from .optimizer import MixedPrecisionOptimizer, _zero_grad_group_helper
 from .utils import shard_buffer
 
+_COMM_QUANT_REC_ERROR = int(os.getenv("COMM_QUANT_REC_ERROR", 0))
+
+def fake_srquantize(x, bits, groupsize=-1):
+    orginal_type = x.dtype
+    x = x.to(torch.float32)
+    x_shape = list(x.size())[0]
+    d = 2 ** (bits - 1)-1 ###
+
+    rem_x = None
+    if groupsize == -1:
+        norm = torch.max(torch.abs(x))
+        group_x = x
+    else:
+        assert len(list(x.shape)) == 1
+        if list(x.shape)[0] % groupsize != 0:
+            rem = list(x.shape)[0] % groupsize
+            rem_x = torch.narrow(x, -1, -rem, rem)
+            x = torch.narrow(x, -1, 0, list(x.shape)[0]-rem)
+            x_shape -= rem
+        group_x = x.reshape(
+            -1,
+            groupsize,
+        )
+        norm, _ = torch.max(group_x.abs(), -1, keepdim=True)
+        norm[norm==0] = 2 ** (bits - 1) - 1 ###
+    
+    # level_float = d * torch.abs(group_x) / norm
+    level_float = d * torch.clamp(torch.abs(group_x) / norm, max=1)
+    previous_level = torch.floor(level_float)
+    # is_next_level = torch.rand(group_x.size()).to(group_x.device) < (level_float - previous_level)
+    is_next_level = torch.rand(group_x.size(), device="cuda") < (level_float - previous_level)
+    new_level = previous_level + is_next_level
+    scale = norm / d
+    x_quant = torch.sign(group_x) * new_level
+    x_quant = x_quant.reshape(x_shape)
+    if rem_x is not None:
+        x_quant = torch.cat((x_quant, rem_x), 0)
+
+    dequant = dequantize(x=x_quant, s=scale, groupsize=groupsize)
+    dequant = dequant.to(orginal_type)
+    return dequant
+
+def dequantize(x, s, groupsize=-1):
+        
+    x_shape = list(x.size())[0]
+    rem_x = None
+    if groupsize == -1:
+        group_x = x
+    else:
+        assert len(list(x.shape)) == 1
+        if list(x.shape)[0] % groupsize != 0:
+            rem = list(x.shape)[0] % groupsize
+            rem_x = torch.narrow(x, -1, -rem, rem)
+            x = torch.narrow(x, -1, 0, list(x.shape)[0]-rem)
+            x_shape -= rem
+        group_x = x.reshape(
+            -1,
+            groupsize,
+        )
+    group_x.mul_(s)
+    x_dequant = group_x.reshape(x_shape)
+    if rem_x is not None:
+        x_dequant = torch.cat((x_dequant, rem_x), 0)
+    return x_dequant
 
 class Range:
     """
@@ -1019,37 +1083,23 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
             stream = grad_buffer.buckets[bucket_index].comm_stream
             stream.wait_stream(torch.cuda.default_stream())
             with torch.cuda.stream(stream):
+                if _COMM_QUANT_REC_ERROR == 1:
+                    pbuf_view_copy = pbuf_views[data_parallel_rank].clone().detach()
                 if self.quantize_helper is not None and self.quantize_helper.quantized_weights:
-                    data_parallel_world_size = mpu.get_data_parallel_world_size()
-                    quantized_shard, scales = self.quantize_helper.quantize_gather_weights(pbuf_views[data_parallel_rank])
-                    pbuf_int8_view = pbuf.view(torch.int8).contiguous()
-                    quantized_buffer_view = pbuf_int8_view[:quantized_shard.numel() * data_parallel_world_size]
-
-                    # All-gather for quantized parameters
-                    torch.distributed._all_gather_base(
-                        quantized_buffer_view,
-                        quantized_shard,
-                        group=data_parallel_group
-                    )
-
-                    # Prepare buffer for all-gathered scales
-                    all_scales = torch.empty(data_parallel_world_size * scales.numel(), dtype=scales.dtype, device=scales.device)
-
-                    # All-gather for scales
-                    torch.distributed._all_gather_base(
-                        all_scales,
-                        scales,
-                        group=data_parallel_group
-                    )
-                    # Dequantize the gathered buffer and update the parameters
-                    self.quantize_helper.dequantize_gather_weights(quantized_buffer_view, all_scales, pbuf)
-                else:
-                    torch.distributed._all_gather_base(
-                        pbuf,
-                        pbuf_views[data_parallel_rank],
-                        group = data_parallel_group,
-                        async_op = False
-                    )
+                    quantize_bits = self.quantize_helper.weight_quantization_bits
+                    quantize_group_size = self.quantize_helper.wq_group_size
+                    tmp = fake_srquantize(pbuf_views[data_parallel_rank], quantize_bits, quantize_group_size)
+                    pbuf_views[data_parallel_rank].copy_(tmp)
+                torch.distributed._all_gather_base(
+                    pbuf,
+                    pbuf_views[data_parallel_rank],
+                    group = data_parallel_group,
+                    async_op = False
+                )
+                if _COMM_QUANT_REC_ERROR == 1:
+                    abs_diff = torch.norm(pbuf_view_copy - pbuf_views[data_parallel_rank], p=2)
+                    rel_diff = abs_diff / torch.norm(pbuf_view_copy, p=2)
+                    print(f"DEBUG after allgather param... dp rank: {data_parallel_rank}, abs_diff: {abs_diff}, rel_diff: {rel_diff}, param norm: {torch.norm(pbuf_view_copy, p=2)}", flush=True)
                 self.all_gather_events[all_gather_event_index].record()
             if not async_op and self.all_gather_events[all_gather_event_index] is not None:
                 self.all_gather_events[all_gather_event_index].synchronize()
