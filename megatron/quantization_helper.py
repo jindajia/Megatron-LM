@@ -13,7 +13,7 @@ def build_or_import_siwzzle_quant_module():
     if module is not None:
         return module
     else:
-        if torch.distributed.is_initialized() and torch.distributed.get_rank()==0:
+        if torch.distributed.is_initialized() and torch.cuda.current_device()==0:
             build_module(pkg_path)
         torch.distributed.barrier()
         module = find_module(pkg_path, module_name)
