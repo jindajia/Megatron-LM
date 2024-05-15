@@ -7,7 +7,7 @@ from apex.optimizers import FusedAdam as Adam
 import math
 import torch
 import itertools
-
+import os
 from megatron import get_args
 from megatron import get_timers
 from megatron import print_rank_0
@@ -16,20 +16,11 @@ from megatron.core import mpu, tensor_parallel
 from .optimizer import MixedPrecisionOptimizer, _zero_grad_group_helper
 from .utils import shard_buffer
 
-
-import os
-# _COMM_QUANT_BITS_PARAMDIFF = int(os.getenv("COMM_QUANT_BITS_PARAMDIFF", -1))
-# _COMM_QUANT_GROUPSIZE_PARAM = int(os.getenv("COMM_QUANT_GROUPSIZE_PARAM", -1))
-_COMM_QUANT_CHUNKNUM_PARAM = int(os.getenv("COMM_QUANT_CHUNKNUM_PARAM", 1))
 _COMM_QUANT_REC_ERROR = int(os.getenv("COMM_QUANT_REC_ERROR", 0))
-_COMM_QUANT_DEBUG_IDQUANT = int(os.getenv("COMM_QUANT_DEBUG_IDQUANT", 0))
-# assert _COMM_QUANT_BITS_PARAMDIFF in [-1, 4, 8]
 
-
-def quantize(x, bits, groupsize=-1):
-    if _COMM_QUANT_DEBUG_IDQUANT:
-        return x, torch.rand((list(x.shape)[0] // groupsize, 1)).to(x.device)
-
+def fake_srquantize(x, bits, groupsize=-1):
+    orginal_type = x.dtype
+    x = x.to(torch.float32)
     x_shape = list(x.size())[0]
     d = 2 ** (bits - 1)-1 ###
 
@@ -62,11 +53,12 @@ def quantize(x, bits, groupsize=-1):
     x_quant = x_quant.reshape(x_shape)
     if rem_x is not None:
         x_quant = torch.cat((x_quant, rem_x), 0)
-    return x_quant, scale
+
+    dequant = dequantize(x=x_quant, s=scale, groupsize=groupsize)
+    dequant = dequant.to(orginal_type)
+    return dequant
 
 def dequantize(x, s, groupsize=-1):
-    if _COMM_QUANT_DEBUG_IDQUANT:
-        return x
         
     x_shape = list(x.size())[0]
     rem_x = None
@@ -88,35 +80,6 @@ def dequantize(x, s, groupsize=-1):
     if rem_x is not None:
         x_dequant = torch.cat((x_dequant, rem_x), 0)
     return x_dequant
-
-
-def use_1int8_represent_2int4(int4_input):
-    if _COMM_QUANT_DEBUG_IDQUANT:
-        half = list(int4_input.shape)[0] // 2
-        return int4_input[:half]
-
-    assert len(list(int4_input.shape)) == 1
-    assert list(int4_input.shape)[0] % 2 == 0
-    half = list(int4_input.shape)[0] // 2
-    a, b = int4_input[:half], int4_input[half:]
-    
-    packed = (a << 4) | (b & 0b00001111)
-
-    return packed
-
-
-def use_2int4_represent_1int8(int8_input, data_parallel_world_size=1):
-    if _COMM_QUANT_DEBUG_IDQUANT:
-        return torch.concat((int8_input, int8_input))
-
-    a_unpacked = int8_input >> 4
-    b_unpacked = int8_input << 4 >> 4
-
-    unpacked = torch.concat((a_unpacked.view(data_parallel_world_size, -1), b_unpacked.view(data_parallel_world_size, -1)), dim=1).view(-1)
-    # unpacked = torch.concat((a_unpacked, b_unpacked))
-
-    return unpacked
-
 
 class Range:
     """
@@ -554,13 +517,9 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
         #   storage & have their own dtype. This is safe because the param
         #   dtype size is always <= grad dtype size.
         self.param_buffers = []
-        self.paramdiff_buffers = []
-
         for gbuf_index, grad_buffer in enumerate(self.grad_buffers):
-            dtype = grad_buffer.dtype
-            size_ratio = torch.finfo(dtype).bits // torch.finfo(params_dtype).bits
+            size_ratio = torch.finfo(grad_buffer.dtype).bits // torch.finfo(params_dtype).bits
             current_param_buffers = []
-            current_paramdiff_buffers = []
             for bucket in grad_buffer.buckets:
 
                 # Handle older/newer method for getting untyped storage.
@@ -585,44 +544,44 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
                 # into the model_params), multiply the offset by the size ratio of grads and
                 # params.
                 offset = bucket.offset * size_ratio
-                param_buffer = param_buffer[offset:offset+bucket.data.numel()]
-                assert param_buffer.data_ptr() == bucket.data.data_ptr(), \
-                    "param_buffer and grad_buffer for same bucket should start at the same byte address"
-                assert param_buffer.numel() == bucket.data.numel(), \
-                    "param_buffer and grad_buffer for same bucket should have the same number of elements"
+                param_buffer = param_buffer[offset : offset + bucket.data.numel()]
+                assert (
+                    param_buffer.data_ptr() == bucket.data.data_ptr()
+                ), "param_buffer and grad_buffer for same bucket should start at the same byte address"
+                assert (
+                    param_buffer.numel() == bucket.data.numel()
+                ), "param_buffer and grad_buffer for same bucket should have the same number of elements"
                 current_param_buffers.append(param_buffer)
-                current_paramdiff_buffers.append(torch.zeros_like(param_buffer))
             self.param_buffers.append(current_param_buffers)
-            self.paramdiff_buffers.append(current_paramdiff_buffers)
 
         # Now construct data structures to manage all-gather handles.
-        self.all_gather_handles = []
-        self.all_gather_handle_index_to_bucket_index_map = []
-        self.model_index_to_all_gather_handle_index_map = {}
+        self.all_gather_events = []
+        self.all_gather_event_index_to_bucket_index_map = []
+        self.model_index_to_all_gather_event_index_map = {}
         self.all_gather_handle_indices = []
-        self.param_to_all_gather_handle_index_map = {}
+        self.param_to_all_gather_event_index_map = {}
         self.param_buffer_copied = []
 
         self.pbuf_view_items = self.get_model_param_buffer_dp_views()
         for (gbuf_index, dtype, bucket_index, _, _) in self.pbuf_view_items:
-            self.all_gather_handle_index_to_bucket_index_map.append(
+            self.all_gather_event_index_to_bucket_index_map.append(
                 (gbuf_index, dtype, bucket_index)
             )
-            all_gather_handle_index = len(self.all_gather_handle_index_to_bucket_index_map) - 1
-            self.all_gather_handles.append(None)
+            all_gather_event_index = len(self.all_gather_event_index_to_bucket_index_map) - 1
+            self.all_gather_events.append(None)
 
             # Store all all_gather_handle_indices.
             model_idx = self.gbuf_idx_to_model_idx_map[gbuf_index]
-            if model_idx not in self.model_index_to_all_gather_handle_index_map:
-                self.model_index_to_all_gather_handle_index_map[model_idx] = []
-            self.model_index_to_all_gather_handle_index_map[model_idx].append(
-                all_gather_handle_index
+            if model_idx not in self.model_index_to_all_gather_event_index_map:
+                self.model_index_to_all_gather_event_index_map[model_idx] = []
+            self.model_index_to_all_gather_event_index_map[model_idx].append(
+                all_gather_event_index
             )
 
             for param in self.grad_buffers[gbuf_index].buckets[bucket_index].params_list:
-                self.param_to_all_gather_handle_index_map[param] = all_gather_handle_index
+                self.param_to_all_gather_event_index_map[param] = all_gather_event_index
             self.param_buffer_copied.append(False)
-        self.num_all_gather_handles = len(self.all_gather_handle_index_to_bucket_index_map)
+        self.num_all_gather_events = len(self.all_gather_event_index_to_bucket_index_map)
 
         self.overlap_param_gather = get_args().overlap_param_gather
         self.remove_pre_hook_handle = None
@@ -1060,7 +1019,7 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
         # kernels don't head-of-line block the compute kernels since we run with
         # CUDA_DEVICE_MAX_CONNECTIONS=1 to support sequence parallelism).
         if self.overlap_param_gather:
-            self._dispatch_gather_model_params(all_gather_handle_index=0)
+            self._dispatch_gather_model_params(all_gather_event_index=0)
 
     def get_model_param_buffer_dp_views(self):
         """
@@ -1082,9 +1041,9 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
         # Add in reverse order in each model chunk since buckets start from the end of the model but we want
         # all-gathers to run first for the start of the model (same order as forward pass).
         # We keep the view_items in model chunk order since we want to still first run all_gather and
-        # all_gather_handle.wait() for the first model chunk.
-        # In all cases, we want all_gather and all_gather_handle.wait() to be called in the same order,
-        # and all_gather_handle.wait() needs to be called just before the corresponding forward pass.
+        # all_gather_event.wait() for the first model chunk.
+        # In all cases, we want all_gather and all_gather_event.wait() to be called in the same order,
+        # and all_gather_event.wait() needs to be called just before the corresponding forward pass.
         view_items = []
         for gbuf_index, buffers in enumerate(self.param_buffers):
             view_items_per_model_chunk = []
@@ -1098,61 +1057,7 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
 
         return view_items
 
-
-    @staticmethod
-    def get_model_buffer_dp_views(model_buffers):
-        """
-        Get shard views of each of the DDP's param/grad buffers.
-
-        In this nested list, the top level is grouped by the virtual model
-        index and the buffer's data type. The sub-level is a list of
-        shards of that buffer, where each shard in the list represents
-        a contiguous view of the buffer, that is owned by a data-parallel
-        rank. The shard boundary does not respect parameter boundaries, and
-        so the elements of some parameters are split across data parallel
-        ranks.
-
-        Additionally, return references to the entire buffers, for use
-        in _reduce_scatter_base and _all_gather_base.
-        """
-
-
-        # Buffer views.
-        view_items = []
-        for model_index, buffers in enumerate(model_buffers):
-            view_items_per_model_chunk = []
-            for bucket_index, buf in enumerate(buffers):
-                dtype = buf.dtype
-                buf_views = shard_buffer(buf)
-                view_items_per_model_chunk.insert(0, (model_index, dtype, bucket_index, buf, buf_views))
-            view_items.extend(view_items_per_model_chunk)
-
-        return view_items
-
-
-    def get_model_paramdiff_buffer_dp_views(self):
-        return self.get_model_buffer_dp_views(self.paramdiff_buffers)
-
-
-    def param_diff_ops(self, op, pbuf2pdbuf=True):
-        pbuf_view_items = self.get_model_param_buffer_dp_views()
-        pbufdiff_view_items = self.get_model_paramdiff_buffer_dp_views()
-        for index, (pbufs, pdbufs) \
-            in enumerate(zip(pbuf_view_items, pbufdiff_view_items)):
-            _, _, _, pbuf, _ = pbufs
-            _, _, _, pdbuf, _ = pdbufs
-            if op == 'cache_model_params':
-                if pbuf2pdbuf:
-                    pdbuf.copy_(pbuf)
-            elif op == 'cal_model_paramdiff':
-                pbuf.sub_(pdbuf)
-            elif op == 'calback_model_param':
-                tmp = pbuf.clone().detach()
-                pbuf.copy_(pdbuf)
-                pbuf.add_(tmp)
-
-
-    def _dispatch_gather_model_params(self, all_gather_handle_index, force_sync=False):
+    def _dispatch_gather_model_params(self, all_gather_event_index, force_sync=False):
         """
         All-gather updated model params.
 
@@ -1170,95 +1075,42 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
             # across all data-parallel ranks, due to padding (done in grad_buffer.py),
             # and extended to the param_bufs. Thus, all sub-views will have consistent
             # start / end indexes across data-parallel ranks.
+            (gbuf_index, dtype, bucket_index, pbuf, pbuf_views) = self.pbuf_view_items[all_gather_event_index]
+            assert all_gather_event_index < len(self.all_gather_events)
 
-            (model_index, dtype, bucket_index, pbuf, pbuf_views) = self.pbuf_view_items[all_gather_handle_index]
-            assert all_gather_handle_index < len(self.all_gather_handles)
-
-            if self.quantize_helper is not None and self.quantize_helper.quantized_weights:
-                quantize_bits = self.quantize_helper.weight_quantization_bits
-                quantize_group_size = self.quantize_helper.wq_group_size
-                self.param_diff_ops('cal_model_paramdiff') 
-                pdbuf_view_items = self.get_model_paramdiff_buffer_dp_views()
-                assert self.overlap_param_gather == False
-
-                # PDEF before allgather: quant -> (use_1int8_represent_2int4) -> allgather
-                param2send = pbuf_views[data_parallel_rank]
-                param2recv = torch.zeros_like(pbuf)
-                if model_index < _COMM_QUANT_CHUNKNUM_PARAM: 
-                    data_parallel_world_size = mpu.get_data_parallel_world_size()
-
-                    if _COMM_QUANT_REC_ERROR == 1:
-                        quant_copy = pbuf_views[data_parallel_rank].clone().detach()
-                        pdbuf_views = pdbuf_view_items[all_gather_handle_index][3]
-                        quant_copy_original_param = pdbuf_views[data_parallel_rank].clone().detach()
-                    param2send, s = quantize(pbuf_views[data_parallel_rank].to(torch.float32), bits=quantize_bits, groupsize=quantize_group_size)
-                    param2send = param2send.to(torch.int8)
-                    scale2send = s
-
-                    if quantize_bits == 4: 
-                        param2send = use_1int8_represent_2int4(int4_input=param2send)
-                        # append fp32 scale2send as 4*int8 to param2send
-                        assert list(scale2send.shape)[1] == 1
-                        scale2send = torch.squeeze(scale2send, 1)
-                        scale2send_fp32shape = list(scale2send.shape)[0]
-                        param2send = torch.cat((param2send, scale2send.view(torch.int8)))
-
-                        shape = list(pbuf.shape)[0] // 2 + scale2send_fp32shape * 4 * data_parallel_world_size
-                        param2recv = torch.zeros(shape, dtype=torch.int8, device=pbuf.device)
-                    else:
-                        param2recv = torch.zeros_like(pbuf, dtype=torch.int8)
-
-                # we donot async allgather
-                all_gather_handle = torch.distributed._all_gather_base(
-                    param2recv,
-                    param2send,
-                    group = data_parallel_group,
-                    # async_op = self.overlap_param_gather
-                )
-
-                # PDEF after allgather: allgather -> (use_2int4_represent_1int8) -> dequant
-                if quantize_bits == 4: 
-                    each_dp_rank_size = list(param2send.shape)[0]
-                    to_unpack_param2recv = []
-                    scales = []
-                    for dp_idx in range(mpu.get_data_parallel_world_size()):
-                        to_unpack = param2recv[each_dp_rank_size*dp_idx : each_dp_rank_size*(dp_idx+1) - scale2send_fp32shape*4]
-                        scale_recvd = param2recv[each_dp_rank_size*(dp_idx+1) - scale2send_fp32shape*4 : each_dp_rank_size*(dp_idx+1)].clone().detach()
-
-                        to_unpack_param2recv.append(to_unpack)
-                        scales.append(torch.unsqueeze(scale_recvd.view(torch.float32), 1))
-                    to_unpack_param2recv = torch.concat(to_unpack_param2recv, dim = 0)
-                    param2recv = use_2int4_represent_1int8(to_unpack_param2recv, data_parallel_world_size)
-
-                pbuf.copy_(param2recv.to(torch.bfloat16))
-
-                if model_index < _COMM_QUANT_CHUNKNUM_PARAM: 
-                    for idx, p in enumerate(pbuf_views): 
-                        tmp = dequantize(pbuf_views[idx], scales[idx].to(pbuf_views[idx].device), groupsize=quantize_group_size)
-                        pbuf_views[idx].copy_(tmp.to(torch.bfloat16))
-                        if _COMM_QUANT_REC_ERROR == 1 and idx == data_parallel_rank:
-                            abs_diff = torch.norm(quant_copy - pbuf_views[data_parallel_rank], p=2)
-                            rel_diff = abs_diff / torch.norm(quant_copy, p=2)
-                            print(f"DEBUG after allgather param... dp rank: {data_parallel_rank},  model_index: {model_index}, abs_diff: {abs_diff}, rel_diff: {rel_diff}, param norm: {torch.norm(quant_copy, p=2)}", flush=True)
-                            rel_diff_wrt_original_param = abs_diff / torch.norm(quant_copy_original_param, p=2)
-                            print(f"DEBUG after allgather param... dp rank: {data_parallel_rank}, model_index: {model_index}, rel_diff wrt original param: {rel_diff_wrt_original_param}", flush=True)
-
-                self.param_diff_ops('calback_model_param')
-
-            else:
-                all_gather_handle = torch.distributed._all_gather_base(
+            self.all_gather_events[all_gather_event_index] = torch.cuda.Event()
+            grad_buffer = self.grad_buffers[gbuf_index]
+            stream = grad_buffer.buckets[bucket_index].comm_stream
+            stream.wait_stream(torch.cuda.default_stream())
+            with torch.cuda.stream(stream):
+                if _COMM_QUANT_REC_ERROR == 1:
+                    pbuf_view_copy = pbuf_views[data_parallel_rank].clone().detach()
+                if self.quantize_helper is not None and self.quantize_helper.quantized_weights:
+                    quantize_bits = self.quantize_helper.weight_quantization_bits
+                    quantize_group_size = self.quantize_helper.wq_group_size
+                    tmp = fake_srquantize(pbuf_views[data_parallel_rank], quantize_bits, quantize_group_size)
+                    pbuf_views[data_parallel_rank].copy_(tmp)
+                torch.distributed._all_gather_base(
                     pbuf,
                     pbuf_views[data_parallel_rank],
                     group = data_parallel_group,
-                    async_op = self.overlap_param_gather
+                    async_op = False
                 )
-            self.all_gather_handles[all_gather_handle_index] = all_gather_handle
-            assert self.all_gather_handle_index_to_bucket_index_map[all_gather_handle_index] == \
-                (model_index, dtype, bucket_index)
+                if _COMM_QUANT_REC_ERROR == 1:
+                    abs_diff = torch.norm(pbuf_view_copy - pbuf_views[data_parallel_rank], p=2)
+                    rel_diff = abs_diff / torch.norm(pbuf_view_copy, p=2)
+                    print(f"DEBUG after allgather param... dp rank: {data_parallel_rank}, abs_diff: {abs_diff}, rel_diff: {rel_diff}, param norm: {torch.norm(pbuf_view_copy, p=2)}", flush=True)
+                self.all_gather_events[all_gather_event_index].record()
+            if not async_op and self.all_gather_events[all_gather_event_index] is not None:
+                self.all_gather_events[all_gather_event_index].synchronize()
+                self.all_gather_events[all_gather_event_index] = None
+                torch.cuda.current_stream().wait_stream(stream)
+            assert self.all_gather_event_index_to_bucket_index_map[all_gather_event_index] == \
+                (gbuf_index, dtype, bucket_index)
             self.param_buffer_copied.append(False)
 
         if not async_op:
-            self._copy_params_from_param_buffer(all_gather_handle_index)
+            self._copy_params_from_param_buffer(all_gather_event_index)
 
     def _make_forward_pre_hook(self):
         """
@@ -1278,9 +1130,9 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
                 if not param.requires_grad:
                     continue
 
-                assert param in self.param_to_all_gather_handle_index_map
-                all_gather_handle_index = self.param_to_all_gather_handle_index_map[param]
-                self._finish_param_sync_helper(all_gather_handle_index)
+                assert param in self.param_to_all_gather_event_index_map
+                all_gather_event_index = self.param_to_all_gather_event_index_map[param]
+                self._finish_param_sync_helper(all_gather_event_index)
 
         return hook
 
@@ -1288,48 +1140,52 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
         """
         Finishes all necessary param syncs for the model_index'th model chunk.
         """
-        if model_index not in self.model_index_to_all_gather_handle_index_map:
+        if model_index not in self.model_index_to_all_gather_event_index_map:
             return
 
-        all_gather_handle_indices = self.model_index_to_all_gather_handle_index_map[model_index]
-        for all_gather_handle_index in all_gather_handle_indices:
-            self._finish_param_sync_helper(all_gather_handle_index)
+        all_gather_event_indices = self.model_index_to_all_gather_event_index_map[model_index]
+        for all_gather_event_index in all_gather_event_indices:
+            self._finish_param_sync_helper(all_gather_event_index)
 
-    def _finish_param_sync_helper(self, all_gather_handle_index):
+    def _finish_param_sync_helper(self, all_gather_event_index):
         """
-        Waits on all_gather_handle if necessary, then copies params from param_buffer
+        Waits on all_gather_event if necessary, then copies params from param_buffer
         into model_params if necessary.
         """
 
         # First check if there is an outstanding all-gather handle for this param.
         # If so, wait on the handle to ensure the communication is finished.
-        assert all_gather_handle_index < len(self.all_gather_handles)
-        all_gather_handle = self.all_gather_handles[all_gather_handle_index]
-        if all_gather_handle is not None:
-            all_gather_handle.wait()
-            self.all_gather_handles[all_gather_handle_index] = None
+        assert all_gather_event_index < len(self.all_gather_events)
+        all_gather_event = self.all_gather_events[all_gather_event_index]
+        if all_gather_event is not None:
+            (gbuf_index, dtype, bucket_index, pbuf, pbuf_views) = self.pbuf_view_items[all_gather_event_index]
+            grad_buffer = self.grad_buffers[gbuf_index]
+            stream = grad_buffer.buckets[bucket_index].comm_stream
+            all_gather_event.synchronize()
+            stream.synchronize()
+            self.all_gather_events[all_gather_event_index] = None
 
             # Launch the all-gather for the next bucket now.
             # We can't pre-launch all-gathers for all buckets at once since we don't
             # want to head-of-line block the compute kernels with communication kernels
             # (since we run with CUDA_DEVICE_MAX_CONNECTIONS=1 to support sequence
             # parallelism).
-            next_all_gather_handle_index = all_gather_handle_index + 1
-            if next_all_gather_handle_index < self.num_all_gather_handles:
-                self._dispatch_gather_model_params(next_all_gather_handle_index)
+            next_all_gather_event_index = all_gather_event_index + 1
+            if next_all_gather_event_index < self.num_all_gather_events:
+                self._dispatch_gather_model_params(next_all_gather_event_index)
 
         # Also check if we have already copied from the param buffer for this
         # handle; if not, complete the copy and mark as such.
-        if not self.param_buffer_copied[all_gather_handle_index]:
-            self._copy_params_from_param_buffer(all_gather_handle_index)
-            self.param_buffer_copied[all_gather_handle_index] = True
+        if not self.param_buffer_copied[all_gather_event_index]:
+            self._copy_params_from_param_buffer(all_gather_event_index)
+            self.param_buffer_copied[all_gather_event_index] = True
 
-    def _copy_params_from_param_buffer(self, all_gather_handle_index):
+    def _copy_params_from_param_buffer(self, all_gather_event_index):
         """
         Copy params from param_buffer to model_params.
         """
-        (gbuf_index, dtype, bucket_index) = self.all_gather_handle_index_to_bucket_index_map[
-            all_gather_handle_index
+        (gbuf_index, dtype, bucket_index) = self.all_gather_event_index_to_bucket_index_map[
+            all_gather_event_index
         ]
         grad_buffer = self.grad_buffers[gbuf_index]
 
@@ -1465,28 +1321,18 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
 
     def _reset_metadata_and_sync_gather_all_model_params(self, force_sync):
         # Reset metadata needed to track results of all-gathers.
-        self.all_gather_handles = [None for _ in range(len(self.all_gather_handles))]
+        self.all_gather_events = [None for _ in range(len(self.all_gather_events))]
         self.param_buffer_copied = [False for _ in range(len(self.param_buffer_copied))]
 
         # Launch synchronous all-gather if --overlap-param-gather is turned on or if force_sync
         # is explicitly set to True (e.g., if we are going to turn off all-gather overlapping for
         # validation / test iterations).
         if not self.overlap_param_gather or force_sync:
-            for all_gather_handle_index in range(self.num_all_gather_handles):
-                self._dispatch_gather_model_params(all_gather_handle_index, force_sync=force_sync)
+            for all_gather_event_index in range(self.num_all_gather_events):
+                self._dispatch_gather_model_params(all_gather_event_index, force_sync=force_sync)
 
     @torch.no_grad()
     def step(self, args, timers):
-        # Copy from each param to paramdiff buffer
-        for gbuf_index, grad_buffer in enumerate(self.grad_buffers):
-            dtype = grad_buffer.dtype
-            for param, (param_start_index, param_end_index, bucket_id) in grad_buffer.param_index_map.items():
-                bucket_offset = grad_buffer.buckets[bucket_id].offset
-                paramdiff_buf = self.paramdiff_buffers[gbuf_index][bucket_id]
-                paramdiff_buf_shard = paramdiff_buf.view(-1)[param_start_index-bucket_offset:param_end_index-bucket_offset]
-                assert param.data.nelement() == paramdiff_buf_shard.nelement()
-                paramdiff_buf_shard.copy_(param.view(-1))
-
         self.update_successful, grad_norm, num_zeros_in_grad = super().step(args, timers)
 
         # If not overlapping all-gather for parameters, launch synchronous all-gather
