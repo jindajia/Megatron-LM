@@ -106,5 +106,4 @@ torchrun $DISTRIBUTED_ARGS pretrain_gpt.py \
     $QUANTIZE_ARGS \
     --distributed-backend nccl \
     --save $CHECKPOINT_PATH \
-    --load $CHECKPOINT_PATH \
-    --exit-duration-in-mins 2840
+    --load $CHECKPOINT_PATH
