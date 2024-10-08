@@ -138,7 +138,7 @@ class Bucket:
                 )
                 event.record()
         if not self.overlap_grad_reduce:
-            torch.cuda.current_stream().wait_stream(self.comm_stream)
+            self.communication_event.wait()
             self.communication_event = None
 
     def finish_grad_sync(self):
@@ -157,7 +157,7 @@ class Bucket:
             f'Communication call has not been issued for this bucket '
             f'({len(self.params_with_grad)}/{len(self.params)} params have grad available)'
         )
-        torch.cuda.current_stream().wait_stream(self.comm_stream)
+        self.communication_event.wait()
         self.communication_event = None
 
     def register_grad_ready(self, param: torch.nn.Parameter):
