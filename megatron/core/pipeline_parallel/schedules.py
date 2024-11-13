@@ -95,12 +95,12 @@ def get_forward_backward_func():
     pipeline_model_parallel_size = parallel_state.get_pipeline_model_parallel_world_size()
     if pipeline_model_parallel_size > 1:
         if parallel_state.get_virtual_pipeline_model_parallel_world_size() is not None:
-            forward_backward_func = forward_backward_pipelining_with_interleaving
+            forward_backward_func, forward_backward_finalize_model_grads_func = forward_backward_pipelining_with_interleaving, forward_backward_pipelining_with_interleaving_finalize_model_grads
         else:
-            forward_backward_func = forward_backward_pipelining_without_interleaving
+            forward_backward_func, forward_backward_finalize_model_grads_func = forward_backward_pipelining_without_interleaving, forward_backward_pipelining_without_interleaving_finalize_model_grads
     else:
-        forward_backward_func = forward_backward_no_pipelining
-    return forward_backward_func
+        forward_backward_func, forward_backward_finalize_model_grads_func = forward_backward_no_pipelining, forward_backward_no_pipelining_finalize_model_grads
+    return forward_backward_func, forward_backward_finalize_model_grads_func
 
 
 def deallocate_output_tensor(out, deallocate_pipeline_outputs=False):
@@ -376,13 +376,30 @@ def forward_backward_no_pipelining(
     if config.timers is not None:
         config.timers('forward-backward').stop()
 
+    return forward_data_store
+
+def forward_backward_no_pipelining_finalize_model_grads(
+    *,
+    forward_step_func,
+    data_iterator: Union[Iterator, List[Iterator]],
+    model: Union[torch.nn.Module, List[torch.nn.Module]],
+    num_microbatches: int,
+    seq_length: int,  # unused
+    micro_batch_size: int,  # unused
+    decoder_seq_length: int = None,  # unused
+    forward_only: bool = False,
+    collect_non_loss_data: bool = False,
+    first_val_step: bool = None,
+):
+    if isinstance(model, list):
+        assert len(model) == 1, "non-pipeline-parallel schedule does not support model chunking"
+        model = model[0]
+    config = get_model_config(model)
+
     if config.finalize_model_grads_func is not None and not forward_only:
         # Finalize model grads (perform full grad all-reduce / reduce-scatter for
         # data parallelism and layernorm all-reduce for sequence parallelism).
         config.finalize_model_grads_func([model])
-
-    return forward_data_store
-
 
 def forward_backward_pipelining_with_interleaving(
     *,
@@ -956,14 +973,27 @@ def forward_backward_pipelining_with_interleaving(
     if config.timers is not None:
         config.timers('forward-backward').stop()
 
+    return forward_data_store
+
+def forward_backward_pipelining_with_interleaving_finalize_model_grads(
+    *,
+    forward_step_func,
+    data_iterator: Union[Iterator, List[Iterator]],
+    model: Union[torch.nn.Module, List[torch.nn.Module]],
+    num_microbatches: int,
+    seq_length: int,
+    micro_batch_size: int,
+    decoder_seq_length: int = None,
+    forward_only: bool = False,
+    collect_non_loss_data: bool = False,
+    first_val_step: bool = None,
+):
+    config = get_model_config(model[0])
     if config.finalize_model_grads_func is not None and not forward_only:
         # Finalize model grads (perform full grad all-reduce / reduce-scatter for
         # data parallelism, layernorm all-reduce for sequence parallelism, and
         # embedding all-reduce for pipeline parallelism).
         config.finalize_model_grads_func(model)
-
-    return forward_data_store
-
 
 def get_tensor_shapes(
     *,
@@ -1319,10 +1349,29 @@ def forward_backward_pipelining_without_interleaving(
     if config.timers is not None:
         config.timers('forward-backward').stop()
 
+    return forward_data_store
+
+def forward_backward_pipelining_without_interleaving_finalize_model_grads(
+    *,
+    forward_step_func,
+    data_iterator: Union[Iterator, List[Iterator]],
+    model: Union[torch.nn.Module, List[torch.nn.Module]],
+    num_microbatches: int,
+    seq_length: int,
+    micro_batch_size: int,
+    decoder_seq_length: int = None,
+    forward_only: bool = False,
+    collect_non_loss_data: bool = False,
+    first_val_step: bool = None,
+):
+    if isinstance(model, list):
+        assert (
+            len(model) == 1
+        ), "non-interleaved pipeline parallelism does not support model chunking"
+        model = model[0]
+    config = get_model_config(model)
     if config.finalize_model_grads_func is not None and not forward_only:
         # Finalize model grads (perform full grad all-reduce / reduce-scatter for
         # data parallelism, layernorm all-reduce for sequence parallelism, and
         # embedding all-reduce for pipeline parallelism).
         config.finalize_model_grads_func([model])
-
-    return forward_data_store

@@ -403,7 +403,8 @@ def get_model(model_provider_func, model_type=ModelType.encoder_or_decoder, wrap
                                                     tensor_parallel_group=mpu.get_tensor_model_parallel_group(),
                                                     pipeline_parallel_group=mpu.get_pipeline_model_parallel_group(),
                                                     hadamard_transform=args.hadamard_transform,
-                                                    gradient_alltoall_pipeline=args.gradient_alltoall_pipeline)
+                                                    gradient_alltoall_pipeline=args.gradient_alltoall_pipeline,
+                                                    stale_high_precision_grad_sync=args.twice_grad_reduce)
 
     if wrap_with_ddp:
         config = get_model_config(model[0])
@@ -518,11 +519,18 @@ def setup_model_and_optimizer(model_provider_func,
 
 
 def train_step(forward_step_func, data_iterator,
-               model, optimizer, opt_param_scheduler, config):
+               model, optimizer, opt_param_scheduler, last_update_successful, config):
     """Single training step."""
     args = get_args()
     timers = get_timers()
 
+    # Start high precision stale gradient reduce-scatter
+    # if args.twice_grad_reduce and args.curr_iteration > 1 and last_update_successful:
+    #     for model_chunk in model:
+    #         model_chunk.start_stale_grad_sync()
+    #         # only for debug
+    #         model_chunk.finish_stale_grad_sync()
+    
     # Set grad to zero.
     for model_chunk in model:
         # If using distributed optimizer, don't zero buffer here; zeroing of buffer is
@@ -532,7 +540,7 @@ def train_step(forward_step_func, data_iterator,
     optimizer.zero_grad()
 
     # Forward pass.
-    forward_backward_func = get_forward_backward_func()
+    forward_backward_func, forward_backward_finalize_model_grads_func = get_forward_backward_func()
     losses_reduced = forward_backward_func(
         forward_step_func=forward_step_func,
         data_iterator=data_iterator,
@@ -542,6 +550,40 @@ def train_step(forward_step_func, data_iterator,
         micro_batch_size=args.micro_batch_size,
         decoder_seq_length=args.decoder_seq_length,
         forward_only=False)
+
+    # Use high precision gradient to update parameters.
+    # if args.twice_grad_reduce and args.curr_iteration > 1 and last_update_successful:
+    #     # for model_chunk in model:
+    #     #     model_chunk.finish_stale_grad_sync()
+                
+    #     increment = get_num_microbatches() * \
+    #     args.micro_batch_size * \
+    #     args.data_parallel_size
+
+    #     opt_param_scheduler.revert_step(decrement=increment)
+
+    #     update_successful, grad_norm, num_zeros_in_grad = optimizer.step_high_precision(args, timers)
+    #     print_rank_0(f'Iter={args.curr_iteration}; After optimizer high precision step: , lr={optimizer.param_groups[0]["lr"]}, grad norm= {grad_norm}, num_zeros_in_grad={num_zeros_in_grad}, last_update_successful={last_update_successful}')
+
+    #     opt_param_scheduler.step(increment=increment)
+
+    #     for model_chunk in model:
+    #         model_chunk.zero_stale_grad_buffer(True)
+
+    # finish gradient all reduce
+    forward_backward_finalize_model_grads_func(
+        forward_step_func=forward_step_func,
+        data_iterator=data_iterator,
+        model=model,
+        num_microbatches=get_num_microbatches(),
+        seq_length=args.seq_length,
+        micro_batch_size=args.micro_batch_size,
+        decoder_seq_length=args.decoder_seq_length,
+        forward_only=False
+    )
+    if args.twice_grad_reduce:
+        for model_chunk in model:
+            model_chunk.finish_stale_grad_sync()
 
     # Empty unused memory.
     if args.empty_unused_memory_level >= 1:
@@ -554,7 +596,38 @@ def train_step(forward_step_func, data_iterator,
 
     # Update parameters.
     timers('optimizer', log_level=1).start(barrier=args.barrier_with_L1_time)
+    
+    # if args.twice_grad_reduce and args.curr_iteration > 0:
+    if args.twice_grad_reduce and args.curr_iteration > 0:
+        optimizer_state = optimizer.state_dict()
+        param_state = optimizer.get_parameter_state('cpu')
+
+    # fake test
+    # if args.twice_grad_reduce and args.curr_iteration > 0:
+    # if args.curr_iteration > 0:
+    #     update_successful, grad_norm, num_zeros_in_grad = optimizer.step_test(args, timers)
+    #     # print_rank_0(f"Iter={args.curr_iteration}; After optimizer step test: , lr={optimizer.param_groups[0]['lr']}, clip grad={optimizer.clip_grad}, grad norm={grad_norm}, num_zeros_in_grad={num_zeros_in_grad}, update_successful={update_successful}")
+    #     optimizer.load_state_dict(optimizer_state)
+    #     optimizer.load_parameter_state_from_state_dict(param_state)
+
     update_successful, grad_norm, num_zeros_in_grad = optimizer.step(args, timers)
+    # print_rank_0(f"Iter={args.curr_iteration}; After optimizer real step: , lr={optimizer.param_groups[0]['lr']}, clip grad={optimizer.clip_grad}, grad norm={grad_norm}, num_zeros_in_grad={num_zeros_in_grad}, update_successful={update_successful} \n")
+    
+    if args.twice_grad_reduce and args.curr_iteration > 0 and update_successful:
+        optimizer.load_state_dict(optimizer_state)
+        optimizer.load_parameter_state_from_state_dict(param_state)
+        update_successful, grad_norm, num_zeros_in_grad = optimizer.step_high_precision(args, timers)
+        # print_rank_0(f'Iter={args.curr_iteration}; After optimizer high precision step: , lr={optimizer.param_groups[0]["lr"]}, grad norm= {grad_norm}, num_zeros_in_grad={num_zeros_in_grad}, last_update_successful={last_update_successful}')
+        
+    if args.twice_grad_reduce:
+        for model_chunk in model:
+            model_chunk.zero_stale_grad_buffer(True)
+
+    # if args.twice_grad_reduce and args.curr_iteration > 0 and update_successful:
+    #     optimizer.load_state_dict(optimizer_state)
+    #     optimizer.load_parameter_state_from_state_dict(param_state)
+        
+
     timers('optimizer').stop()
 
     # Vision momentum.
@@ -582,8 +655,8 @@ def train_step(forward_step_func, data_iterator,
         for key in losses_reduced[0]:
             losses_reduced_for_key = [x[key] for x in losses_reduced]
             loss_reduced[key] = sum(losses_reduced_for_key) / len(losses_reduced_for_key)
-        return loss_reduced, skipped_iter, grad_norm, num_zeros_in_grad
-    return {}, skipped_iter, grad_norm, num_zeros_in_grad
+        return loss_reduced, skipped_iter, grad_norm, num_zeros_in_grad, update_successful
+    return {}, skipped_iter, grad_norm, num_zeros_in_grad, update_successful
 
 
 def training_log(loss_dict, total_loss_dict, learning_rate, iteration,
@@ -905,6 +978,7 @@ def train(forward_step_func, model, optimizer, opt_param_scheduler,
         gc.collect()
 
     num_microbatches = get_num_microbatches()
+    last_update_successful = False
     while iteration < args.train_iters:
         if args.profile and \
            iteration == args.profile_step_start and \
@@ -928,12 +1002,13 @@ def train(forward_step_func, model, optimizer, opt_param_scheduler,
         args.curr_iteration = iteration
         if quantize_helper is not None:
             quantize_helper.set_gradient_quantization(iteration >= args.gradients_quantization_start_iteration and args.quantized_gradients)
-        loss_dict, skipped_iter, grad_norm, num_zeros_in_grad = \
+        loss_dict, skipped_iter, grad_norm, num_zeros_in_grad, last_update_successful = \
             train_step(forward_step_func,
                        train_data_iterator,
                        model,
                        optimizer,
                        opt_param_scheduler,
+                       last_update_successful,
                        config)
         iteration += 1
         batch_size = mpu.get_data_parallel_world_size() * \
@@ -1093,7 +1168,7 @@ def evaluate(forward_step_func,
             if verbose:
                 print_rank_0(f'Evaluating iter {iteration}/{args.eval_iters}')
 
-            forward_backward_func = get_forward_backward_func()
+            forward_backward_func, forward_backward_finalize_model_grads_func = get_forward_backward_func()
             # Don't care about timing during evaluation
             config.timers = None
             loss_dicts = forward_backward_func(
@@ -1105,6 +1180,17 @@ def evaluate(forward_step_func,
                 micro_batch_size=args.micro_batch_size,
                 decoder_seq_length=args.decoder_seq_length,
                 forward_only=True)
+
+            forward_backward_finalize_model_grads_func(
+                forward_step_func=forward_step_func,
+                data_iterator=data_iterator,
+                model=model,
+                num_microbatches=eval_num_microbatches,
+                seq_length=args.seq_length,
+                micro_batch_size=args.micro_batch_size,
+                decoder_seq_length=args.decoder_seq_length,
+                forward_only=True
+            )
             config.timers = get_timers()
 
             # Empty unused memory

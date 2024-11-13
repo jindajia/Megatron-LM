@@ -51,6 +51,7 @@ class QuantizationHelper:
                  pipeline_parallel_group: torch.distributed.ProcessGroup = None,
                  hadamard_transform=False,
                  gradient_alltoall_pipeline=1,
+                 stale_high_precision_grad_sync=False,
                  ):
 
         self.quantized_weights = quantized_weights
@@ -71,6 +72,7 @@ class QuantizationHelper:
         self.gradient_alltoall_pipeline=gradient_alltoall_pipeline
         self.grad_pipeline_streams = [torch.cuda.Stream() for _ in range(gradient_alltoall_pipeline)]
         self.quantize_weigth_stream = torch.cuda.Stream()
+        self.stale_high_precision_grad_sync = stale_high_precision_grad_sync
         if self.quantized_gradients or self.quantized_weights:
             self.set_local_all_to_all_group()
             self.quant_module = self.build_or_import_siwzzle_quant_module()

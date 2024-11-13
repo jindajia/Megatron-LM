@@ -202,6 +202,35 @@ class DistributedDataParallel(MegatronModule):
         for expert_grad in self.expert_grads:
             expert_grad /= self.data_parallel_world_size
 
+    def zero_stale_grad_buffer(self, zero_buffer):
+        for grad_buffer in self.grad_buffers.values():
+            grad_buffer.reset_stale_buffer(zero_buffer)
+
+    def start_stale_grad_sync(self, *unused):
+        """
+        Initiates grad sync (all-reduce or reduce-scatter) communication operations
+        for all model gradients.
+
+        When overlap_grad_reduce is set to True, dispatches asynchronous communication
+        calls. When overlap_grad_reduce is set to False, calls synchronous
+        communication ops.
+        """
+        
+        for grad_buffer in self.grad_buffers.values():
+            grad_buffer.start_stale_grad_sync()
+
+    def finish_stale_grad_sync(self):
+        """
+        Finishes grad sync (all-reduce or reduce-scatter) communication operations
+        for all model gradients.
+
+        When overlap_grad_reduce is set to True, waits for asynchronous communication
+        calls to complete. When overlap_grad_reduce is set to False, calls synchronous
+        communication ops.
+        """
+        for grad_buffer in self.grad_buffers.values():
+            grad_buffer.finish_stale_grad_sync()
+
     def zero_grad_buffer(self, zero_buffer):
         """
         Zeros out all grad buffers. Needs to be called at the beginning of each

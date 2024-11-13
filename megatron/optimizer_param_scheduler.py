@@ -123,6 +123,14 @@ class OptimizerParamScheduler(object):
 
         return self.min_lr + coeff * delta_lr
 
+    def revert_step(self, decrement):
+        """Set lr for all parameters groups."""
+        self.num_steps -= decrement
+        new_lr = self.get_lr()
+        new_wd = self.get_wd()
+        for group in self.optimizer.param_groups:
+            group['lr'] = new_lr * group.get('lr_mult', 1.0)
+            group['weight_decay'] = new_wd * group.get('wd_mult', 1.0)
 
     def step(self, increment):
         """Set lr for all parameters groups."""

@@ -1214,6 +1214,9 @@ def _add_quantize_args(parser):
     group.add_argument('--hadamard-transform', action='store_true',
                        default=False,
                        help='Hadamard Transformation before gradient reduction to decrease quantization error')
+    group.add_argument('--twice-grad-reduce', action='store_true',
+                       default=False,
+                       help='If true, gradient reduce-scatter will happen twice, first is low precision, second is high precision.')
     return parser
 
 def _add_validation_args(parser):

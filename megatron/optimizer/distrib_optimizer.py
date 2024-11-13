@@ -818,7 +818,7 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
                     'Skipping loading grad scaler ...'
                 )
 
-    def get_parameter_state(self):
+    def get_parameter_state(self, device='cpu'):
         """Get parameter state (i.e., parameter & optimizer tensors).
 
         This method performs three steps:
@@ -854,7 +854,7 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
                     assert gbuf_world_numel % data_parallel_world_size == 0
                     gbuf_local_numel = gbuf_world_numel // data_parallel_world_size
                     local_shards = {
-                        key: torch.empty((gbuf_local_numel,), dtype=torch.float32, device="cpu")
+                        key: torch.empty((gbuf_local_numel,), dtype=torch.float32, device=device)
                         for key in ("param", "exp_avg", "exp_avg_sq")
                     }
 
@@ -885,7 +885,7 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
                         # Gather tensor list.
                         if data_parallel_rank == 0:
                             recv_tensors = [
-                                torch.empty((gbuf_local_numel,), dtype=torch.float32, device="cpu")
+                                torch.empty((gbuf_local_numel,), dtype=torch.float32, device=device)
                                 for _ in range(data_parallel_world_size)
                             ]
                         else:
@@ -1387,6 +1387,24 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
                 main_data.append(main_param.data)
         return model_data, main_data
 
+    def _copy_high_precision_grads_to_main_grads(self):
+
+        def copy_group_grads(model_groups, shard_main_groups):
+            for model_group, shard_main_group in zip(model_groups, shard_main_groups):
+                for model_param, shard_main_param in zip(model_group, shard_main_group):
+
+                    param_range_map = self.get_model_param_range_map(model_param)
+                    param_range = param_range_map["param"]
+                    assert param_range.size == shard_main_param.nelement()
+
+                    model_grad = model_param.stale_grad
+                    shard_model_grad = model_grad.view(-1)[param_range.start : param_range.end]
+                    shard_main_param.grad = shard_model_grad.cuda().float()
+
+        # Copy model groups to shard groups.
+        copy_group_grads(self.model_float16_groups, self.shard_fp32_from_float16_groups)
+        copy_group_grads(self.model_fp32_groups, self.shard_fp32_groups)
+
     def _copy_model_grads_to_main_grads(self):
         """
         Copy model grads to main grads.
@@ -1486,6 +1504,55 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
                 self._dispatch_gather_model_params(all_gather_handle_index, force_sync=force_sync)
 
     @torch.no_grad()
+    def step_high_precision(self, args, timers):
+        
+        # Copy high precision gradients to main params.
+        timers('optimizer-copy-highprecision-grad-to-main-grad', log_level=1).start(barrier=args.barrier_with_L1_time)
+        self._copy_high_precision_grads_to_main_grads()
+        timers('optimizer-copy-highprecision-grad-to-main-grad').stop()
+
+        # Do unscale, check for inf, and update grad scaler only for
+        # the case that grad scaler is provided.
+        if self.grad_scaler:
+
+            # Unscale and check for inf/nan.
+            timers('optimizer-unscale-and-check-inf', log_level=1).start(
+                barrier=args.barrier_with_L1_time
+            )
+            found_inf_flag = self._unscale_main_grads_and_check_for_nan()
+            timers('optimizer-unscale-and-check-inf').stop()
+
+            # We are done with scaling gradients
+            # so we can update the loss scale.
+            self.grad_scaler.update(found_inf_flag)
+
+            # If we found inf/nan, skip the update.
+            if found_inf_flag:
+                return False, None, None
+
+        # Clip the main gradients.
+        timers('optimizer-clip-main-grad', log_level=1).start(barrier=args.barrier_with_L1_time)
+        grad_norm = None
+        if self.clip_grad > 0.0:
+            grad_norm = self.clip_grad_norm(self.clip_grad, self.check_for_nan_in_grad)
+        timers('optimizer-clip-main-grad').stop()
+
+        # Count the zeros in the grads.
+        timers('optimizer-count-zeros', log_level=1).start(barrier=args.barrier_with_L1_time)
+        num_zeros_in_grad = self.count_zeros() if self.log_num_zeros_in_grad else None
+        timers('optimizer-count-zeros').stop()
+
+        # Step the optimizer.
+        timers('optimizer-inner-step', log_level=1).start(barrier=args.barrier_with_L1_time)
+        self.optimizer.step()
+        timers('optimizer-inner-step').stop()
+
+        # Successful update.
+        return True, grad_norm, num_zeros_in_grad
+
+        # return self.update_successful, grad_norm, num_zeros_in_grad
+
+    @torch.no_grad()
     def step(self, args, timers):
 
         self.update_successful, grad_norm, num_zeros_in_grad = super().step(args, timers)
@@ -1500,3 +1567,50 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
         timers('params-all-gather').stop()
 
         return self.update_successful, grad_norm, num_zeros_in_grad
+    
+    @torch.no_grad()
+    def step_test(self, args, timers):
+
+        # Copy gradients from model params to main params.
+        timers('optimizer-copy-to-main-grad', log_level=1).start(barrier=args.barrier_with_L1_time)
+        self._copy_model_grads_to_main_grads()
+        timers('optimizer-copy-to-main-grad').stop()
+
+        # Do unscale, check for inf, and update grad scaler only for
+        # the case that grad scaler is provided.
+        if self.grad_scaler:
+
+            # Unscale and check for inf/nan.
+            timers('optimizer-unscale-and-check-inf', log_level=1).start(
+                barrier=args.barrier_with_L1_time
+            )
+            found_inf_flag = self._unscale_main_grads_and_check_for_nan()
+            timers('optimizer-unscale-and-check-inf').stop()
+
+            # We are done with scaling gradients
+            # so we can update the loss scale.
+            self.grad_scaler.update(found_inf_flag)
+
+            # If we found inf/nan, skip the update.
+            if found_inf_flag:
+                return False, None, None
+
+        # Clip the main gradients.
+        timers('optimizer-clip-main-grad', log_level=1).start(barrier=args.barrier_with_L1_time)
+        grad_norm = None
+        if self.clip_grad > 0.0:
+            grad_norm = self.clip_grad_norm(self.clip_grad, self.check_for_nan_in_grad)
+        timers('optimizer-clip-main-grad').stop()
+
+        # Count the zeros in the grads.
+        timers('optimizer-count-zeros', log_level=1).start(barrier=args.barrier_with_L1_time)
+        num_zeros_in_grad = self.count_zeros() if self.log_num_zeros_in_grad else None
+        timers('optimizer-count-zeros').stop()
+
+        # Step the optimizer.
+        timers('optimizer-inner-step', log_level=1).start(barrier=args.barrier_with_L1_time)
+        self.optimizer.step()
+        timers('optimizer-inner-step').stop()
+
+        # Successful update.
+        return True, grad_norm, num_zeros_in_grad
