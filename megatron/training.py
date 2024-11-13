@@ -50,6 +50,7 @@ from megatron.core.pipeline_parallel import get_forward_backward_func
 from megatron.utils import report_memory
 from megatron.model.vision.knn_monitor import compute_feature_bank
 from .quantization_helper import QuantizationHelper
+from megatron.optimizer.optimizer_helper import rollback_optimizer_step
 
 def print_datetime(string):
     """Note that this call will sync across all ranks."""
@@ -599,8 +600,7 @@ def train_step(forward_step_func, data_iterator,
     
     # if args.twice_grad_reduce and args.curr_iteration > 0:
     if args.twice_grad_reduce and args.curr_iteration > 0:
-        optimizer_state = optimizer.state_dict()
-        param_state = optimizer.get_parameter_state('cpu')
+        optimizer.save_parameters_backup()
 
     # fake test
     # if args.twice_grad_reduce and args.curr_iteration > 0:
@@ -614,8 +614,8 @@ def train_step(forward_step_func, data_iterator,
     # print_rank_0(f"Iter={args.curr_iteration}; After optimizer real step: , lr={optimizer.param_groups[0]['lr']}, clip grad={optimizer.clip_grad}, grad norm={grad_norm}, num_zeros_in_grad={num_zeros_in_grad}, update_successful={update_successful} \n")
     
     if args.twice_grad_reduce and args.curr_iteration > 0 and update_successful:
-        optimizer.load_state_dict(optimizer_state)
-        optimizer.load_parameter_state_from_state_dict(param_state)
+        rollback_optimizer_step(optimizer.optimizer)
+        optimizer.rollback_parameters()
         update_successful, grad_norm, num_zeros_in_grad = optimizer.step_high_precision(args, timers)
         # print_rank_0(f'Iter={args.curr_iteration}; After optimizer high precision step: , lr={optimizer.param_groups[0]["lr"]}, grad norm= {grad_norm}, num_zeros_in_grad={num_zeros_in_grad}, last_update_successful={last_update_successful}')
         
