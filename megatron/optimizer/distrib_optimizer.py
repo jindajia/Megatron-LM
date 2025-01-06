@@ -391,6 +391,12 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
         shard_fp32_groups = []
         shard_fp32_from_float16_groups = []
 
+        # Same as shard_fp32_params_this_group, but orgainzed in bucket wise. 
+        # (gbuf_index, dtype, bucket_index, group_index) -> shard_fp32_params_this_group
+        # (gbuf_index, dtype, bucket_index, group_index) -> shard_fp32_from_float16_params_this_group
+        bucket_wise_shard_fp32_groups = {} 
+        bucket_wise_shard_fp32_from_float16_groups = {}
+        
         # Allocate (or slice) each group's param shard.
         for group_index, group_range in enumerate(opt_group_ranges):
 
@@ -437,11 +443,18 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
                     shard_float16_params_this_group.append(shard_model_param)
                     shard_fp32_from_float16_params_this_group.append(shard_main_param)
 
+                    bucket_wise_shard_fp32_from_float16_params_this_group = bucket_wise_shard_fp32_from_float16_groups.get((gbuf_index, dtype, bucket_index, group_index), [])
+                    bucket_wise_shard_fp32_from_float16_params_this_group.append(shard_main_param)
+                    bucket_wise_shard_fp32_from_float16_groups.setdefault((gbuf_index, dtype, bucket_index, group_index), bucket_wise_shard_fp32_from_float16_params_this_group)
+
                 # fp32 params.
                 elif model_param.type() == 'torch.cuda.FloatTensor':
                     shard_model_param = model_param.view(-1)[param_range.start : param_range.end]
                     model_fp32_params_this_group.append(model_param)
                     shard_fp32_params_this_group.append(shard_model_param)
+                    bucket_wise_shard_fp32_params_this_group = bucket_wise_shard_fp32_groups.get((gbuf_index, dtype, bucket_index, group_index), [])
+                    bucket_wise_shard_fp32_params_this_group.append(shard_model_param)
+                    bucket_wise_shard_fp32_groups.setdefault((gbuf_index, dtype, bucket_index, group_index), bucket_wise_shard_fp32_params_this_group)
                     tensor_parallel.copy_tensor_model_parallel_attributes(
                         shard_model_param, model_param
                     )
@@ -469,6 +482,8 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
             shard_float16_groups,
             shard_fp32_groups,
             shard_fp32_from_float16_groups,
+            bucket_wise_shard_fp32_groups,
+            bucket_wise_shard_fp32_from_float16_groups,
         )
 
     def __init__(
@@ -545,6 +560,8 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
             self.shard_float16_groups,
             self.shard_fp32_groups,
             self.shard_fp32_from_float16_groups,
+            self.bucket_wise_shard_fp32_groups,
+            self.bucket_wise_shard_fp32_from_float16_groups,
         ) = self.build_model_and_main_param_groups(
             self.gbuf_ranges, self.model_param_gbuf_map, self.opt_group_ranges
         )

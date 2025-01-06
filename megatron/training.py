@@ -50,7 +50,7 @@ from megatron.core.pipeline_parallel import get_forward_backward_func
 from megatron.utils import report_memory
 from megatron.model.vision.knn_monitor import compute_feature_bank
 from .quantization_helper import QuantizationHelper
-
+from .optimizer_helper import optimizer_helper_bucket_wise_inner_step, optimizer_helper_step
 def print_datetime(string):
     """Note that this call will sync across all ranks."""
     torch.distributed.barrier()
@@ -554,7 +554,15 @@ def train_step(forward_step_func, data_iterator,
 
     # Update parameters.
     timers('optimizer', log_level=1).start(barrier=args.barrier_with_L1_time)
-    update_successful, grad_norm, num_zeros_in_grad = optimizer.step(args, timers)
+    # ------------------------- JINDA_DEBUG for optimizer step -------------------------
+    
+    # Option 1 original optimizer step
+    # update_successful, grad_norm, num_zeros_in_grad = optimizer.step(args, timers)
+    
+    # Option 2 optimizer helper step
+    update_successful, grad_norm, num_zeros_in_grad = optimizer_helper_step(optimizer, args, timers)
+    
+    # ------------------------- JINDA_DEBUG for optimizer step -------------------------
     timers('optimizer').stop()
 
     # Vision momentum.
