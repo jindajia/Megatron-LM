@@ -1187,6 +1187,9 @@ def _add_distributed_args(parser):
                        'configurations. The number of min/max thread groups and thread '
                        'group cluster size of each communicator can be configured by '
                        'setting `min_ctas`, `max_ctas`, and `cga_cluster_size`.')
+    group.add_argument('--fast-slow-grad-reduce', action='store_true',
+                       default=False,
+                       help='If true, gradient reduce-scatter will happen twice, first is low precision, second is high precision.')
     return parser
 
 def _add_quantize_args(parser):

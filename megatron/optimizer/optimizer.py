@@ -72,6 +72,26 @@ class MegatronOptimizer(ABC):
             for param in param_group['params']:
                 params.append(param)
         return params
+    
+    @torch.no_grad()
+    def save_parameters_backup(self):
+        parameters = self.get_parameters()
+        backups = []
+        for param in parameters:
+            p = param.detach().clone()
+            s1 = self.optimizer.state[param]["exp_avg"].detach().clone() if "exp_avg" in self.optimizer.state[param] else torch.zeros_like(param.data).float()
+            s2 = self.optimizer.state[param]["exp_avg_sq"].detach().clone() if "exp_avg_sq" in self.optimizer.state[param] else torch.zeros_like(param.data).float()
+            backups.append((p, s1, s2))
+        self.parameters_backup = backups
+
+    @torch.no_grad()
+    def rollback_parameters(self):
+        parameters = self.get_parameters()
+        for param, (backup, s1, s2) in zip(parameters, self.parameters_backup):
+            param.copy_(backup)
+            self.optimizer.state[param]["exp_avg"] = s1
+            self.optimizer.state[param]["exp_avg_sq"] = s2
+        self.parameters_backup = None
 
     def get_main_grads_for_grad_norm(self):
 

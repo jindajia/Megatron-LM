@@ -15,6 +15,7 @@ from megatron.core import mpu, tensor_parallel
 
 from .optimizer import MixedPrecisionOptimizer, _zero_grad_group_helper
 from .utils import shard_buffer
+from collections import defaultdict
 
 
 import os
@@ -394,9 +395,12 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
         # Same as shard_fp32_params_this_group, but orgainzed in bucket wise. 
         # (gbuf_index, dtype, bucket_index, group_index) -> shard_fp32_params_this_group
         # (gbuf_index, dtype, bucket_index, group_index) -> shard_fp32_from_float16_params_this_group
-        bucket_wise_shard_fp32_groups = {} 
         bucket_wise_shard_fp32_from_float16_groups = {}
-        
+        bucket_wise_shard_fp32_groups = {} 
+
+        bucket_wise_model_float16_groups = {}
+        bucket_wise_model_fp32_groups = {}
+
         # Allocate (or slice) each group's param shard.
         for group_index, group_range in enumerate(opt_group_ranges):
 
@@ -447,6 +451,10 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
                     bucket_wise_shard_fp32_from_float16_params_this_group.append(shard_main_param)
                     bucket_wise_shard_fp32_from_float16_groups.setdefault((gbuf_index, dtype, bucket_index, group_index), bucket_wise_shard_fp32_from_float16_params_this_group)
 
+                    bucket_wise_model_float16_this_group = bucket_wise_model_float16_groups.get((gbuf_index, dtype, bucket_index, group_index), [])
+                    bucket_wise_model_float16_this_group.append(model_param)
+                    bucket_wise_model_float16_groups.setdefault((gbuf_index, dtype, bucket_index, group_index), bucket_wise_model_float16_this_group)
+
                 # fp32 params.
                 elif model_param.type() == 'torch.cuda.FloatTensor':
                     shard_model_param = model_param.view(-1)[param_range.start : param_range.end]
@@ -455,6 +463,11 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
                     bucket_wise_shard_fp32_params_this_group = bucket_wise_shard_fp32_groups.get((gbuf_index, dtype, bucket_index, group_index), [])
                     bucket_wise_shard_fp32_params_this_group.append(shard_model_param)
                     bucket_wise_shard_fp32_groups.setdefault((gbuf_index, dtype, bucket_index, group_index), bucket_wise_shard_fp32_params_this_group)
+                    
+                    bucket_wise_model_fp32_this_group = bucket_wise_model_fp32_groups.get((gbuf_index, dtype, bucket_index, group_index), [])
+                    bucket_wise_model_fp32_this_group.append(model_param)
+                    bucket_wise_model_fp32_groups.setdefault((gbuf_index, dtype, bucket_index, group_index), bucket_wise_model_fp32_this_group)
+
                     tensor_parallel.copy_tensor_model_parallel_attributes(
                         shard_model_param, model_param
                     )
@@ -482,8 +495,10 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
             shard_float16_groups,
             shard_fp32_groups,
             shard_fp32_from_float16_groups,
-            bucket_wise_shard_fp32_groups,
             bucket_wise_shard_fp32_from_float16_groups,
+            bucket_wise_shard_fp32_groups,
+            bucket_wise_model_float16_groups,
+            bucket_wise_model_fp32_groups,
         )
 
     def __init__(
@@ -538,7 +553,8 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
         self.gbuf_ranges = []
         self.per_bucket_numel = []
         self.per_bucket_numel_unpadded = []
-        for grad_buffer in self.grad_buffers:
+        self.bucket_map_to_global_idx = {}
+        for grad_buffer_idx, grad_buffer in enumerate(self.grad_buffers):
             self.per_bucket_numel.append(
                 {grad_buffer.dtype: [bucket.data.numel() for bucket in grad_buffer.buckets]}
             )
@@ -546,6 +562,11 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
                 {grad_buffer.dtype: [bucket.numel_unpadded for bucket in grad_buffer.buckets]}
             )
             self.gbuf_ranges.append(self.build_gbuf_range_map(grad_buffer))
+
+            """This is for Fast-Slow Optimizer step, since we need to do optimzier step for each bucket, 
+            and we need to know the global index of each bucket, will be used in FastSlowGradReduceHelper bucket_wise_optimizer_step"""
+            for bucket_index, bucket in enumerate(grad_buffer.buckets):
+                self.bucket_map_to_global_idx[bucket] = (grad_buffer_idx, grad_buffer.dtype, bucket_index)
         self.model_param_gbuf_map = self.build_model_param_gbuf_map(self.gbuf_ranges)
 
         # Optimizer ranges.
@@ -560,8 +581,10 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
             self.shard_float16_groups,
             self.shard_fp32_groups,
             self.shard_fp32_from_float16_groups,
-            self.bucket_wise_shard_fp32_groups,
             self.bucket_wise_shard_fp32_from_float16_groups,
+            self.bucket_wise_shard_fp32_groups,
+            self.bucket_wise_model_float16_groups,
+            self.bucket_wise_model_fp32_groups,
         ) = self.build_model_and_main_param_groups(
             self.gbuf_ranges, self.model_param_gbuf_map, self.opt_group_ranges
         )
@@ -1380,6 +1403,25 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
         grad_buf = grad_buffer.buckets[bucket_index].data
         assert param_buf.data_ptr() == grad_buf.data_ptr()
         grad_buf.zero_()
+
+    def copy_high_precision_grads_to_main_grads_each_bucket(self, gbuf_index, dtype, bucket_index):
+
+        def copy_this_group_grads(model_group, shard_main_group):
+            for model_param, shard_main_param in zip(model_group, shard_main_group):
+
+                param_range_map = self.get_model_param_range_map(model_param)
+                param_range = param_range_map["param"]
+                assert param_range.size == shard_main_param.nelement()
+                assert model_param.stale_grad.data.is_contiguous()
+                model_grad = model_param.stale_grad
+                shard_model_grad = model_grad.view(-1)[param_range.start : param_range.end]
+                shard_main_param.grad = shard_model_grad.cuda().float() 
+                # shard_main_param.grad.copy_(shard_model_grad.cuda().float()) JINDA_DEBUG
+        
+        
+        for group_index, param_group in enumerate(self.optimizer.param_groups):
+            copy_this_group_grads(self.bucket_wise_model_float16_groups.get((gbuf_index, dtype, bucket_index, group_index), []), self.bucket_wise_shard_fp32_from_float16_groups.get((gbuf_index, dtype, bucket_index, group_index), []))
+            copy_this_group_grads(self.bucket_wise_model_fp32_groups.get((gbuf_index, dtype, bucket_index, group_index), []), self.bucket_wise_shard_fp32_groups.get((gbuf_index, dtype, bucket_index, group_index), []))
 
     def _collect_main_grad_data_for_unscaling(self):
         """

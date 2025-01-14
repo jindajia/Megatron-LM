@@ -50,7 +50,7 @@ from megatron.core.pipeline_parallel import get_forward_backward_func
 from megatron.utils import report_memory
 from megatron.model.vision.knn_monitor import compute_feature_bank
 from .quantization_helper import QuantizationHelper
-from .optimizer_helper import optimizer_helper_bucket_wise_inner_step, optimizer_helper_step
+from .optimizer_helper import FastSlowGradReduceHelper, optimizer_helper_step, rollback_optimizer_step
 def print_datetime(string):
     """Note that this call will sync across all ranks."""
     torch.distributed.barrier()
@@ -404,6 +404,9 @@ def get_model(model_provider_func, model_type=ModelType.encoder_or_decoder, wrap
                                                     pipeline_parallel_group=mpu.get_pipeline_model_parallel_group(),
                                                     hadamard_transform=args.hadamard_transform,
                                                     gradient_alltoall_pipeline=args.gradient_alltoall_pipeline)
+    fast_slow_grad_reduce_helper = None
+    if args.fast_slow_grad_reduce:
+        fast_slow_grad_reduce_helper = FastSlowGradReduceHelper()
 
     if wrap_with_ddp:
         config = get_model_config(model[0])
@@ -416,7 +419,9 @@ def get_model(model_provider_func, model_type=ModelType.encoder_or_decoder, wrap
                      # Turn off bucketing for model_chunk 2 onwards, since communication for these
                      # model chunks is overlapped with compute anyway.
                      disable_bucketing=(model_chunk_idx > 0),
-                     quantization_helper=quantize_helper)
+                     quantization_helper=quantize_helper,
+                     fast_slow_grad_reduce_helper=fast_slow_grad_reduce_helper,
+                     )
                  for (model_chunk_idx, model_chunk) in enumerate(model)]
 
         # Broadcast params from data parallel src rank to other data parallel ranks.
@@ -492,6 +497,9 @@ def setup_model_and_optimizer(model_provider_func,
                                        scale_lr_cond, lr_mult)
     if hasattr(model[0], 'quantization_helper'):
         optimizer.quantize_helper = model[0].quantization_helper
+    if hasattr(model[0], 'fast_slow_grad_reduce_helper') and model[0].fast_slow_grad_reduce_helper is not None:
+        model[0].fast_slow_grad_reduce_helper.set_optimizer(optimizer)
+
     opt_param_scheduler = get_optimizer_param_scheduler(optimizer)
 
     if args.load is not None:
@@ -523,6 +531,7 @@ def train_step(forward_step_func, data_iterator,
     args = get_args()
     timers = get_timers()
 
+
     # Set grad to zero.
     for model_chunk in model:
         # If using distributed optimizer, don't zero buffer here; zeroing of buffer is
@@ -552,18 +561,86 @@ def train_step(forward_step_func, data_iterator,
         unwrapped_model = unwrap_model(model[0])
         unwrapped_model.cancel_gradients_last_layer(args.curr_iteration)
 
+    fast_slow_grad_reduce_helper = model[0].fast_slow_grad_reduce_helper
     # Update parameters.
     timers('optimizer', log_level=1).start(barrier=args.barrier_with_L1_time)
+    if torch.distributed.is_initialized():
+        rank = torch.distributed.get_rank()
+    else:
+        rank = 0
+
+    if fast_slow_grad_reduce_helper is not None:
+        if  fast_slow_grad_reduce_helper.last_iter_updated_successfully is True:
+            for group_index, param_group in enumerate(optimizer.optimizer.param_groups):
+                if len(param_group['params']) > 0:
+                    if 'step' in param_group:
+                        param_group['step'] += 1
+                    else:
+                        param_group['step'] = 1
+        # if args.curr_iteration > 0:
+        optimizer.save_parameters_backup()
+        step_list_copy = []
+        for group_index, param_group in enumerate(optimizer.optimizer.param_groups):
+            if 'step' in param_group:
+                step_list_copy.append(param_group['step'])
+            else:
+                step_list_copy.append(None)
+    
+    # for group_index, param_group in enumerate(optimizer.optimizer.param_groups):
+    #     if 'step' in param_group:
+    #         step = param_group['step']
+    #         print(f'JINDA_DEBUG before optimizer step, iter: {args.curr_iteration}, rank: {rank}, group_index: {group_index},   param step:{step}')
+    #     else:
+    #         print(f'JINDA_DEBUG before optimizer step, iter: {args.curr_iteration}, rank: {rank}, group_index: {group_index},   param step: None')
+
+
     # ------------------------- JINDA_DEBUG for optimizer step -------------------------
     
     # Option 1 original optimizer step
-    # update_successful, grad_norm, num_zeros_in_grad = optimizer.step(args, timers)
+    update_successful, grad_norm, num_zeros_in_grad = optimizer.step(args, timers)
     
     # Option 2 optimizer helper step
-    update_successful, grad_norm, num_zeros_in_grad = optimizer_helper_step(optimizer, args, timers)
-    
+    # update_successful, grad_norm, num_zeros_in_grad = optimizer_helper_step(optimizer, args, timers)
+
+    # Option 3 Fake twice reduce, only used for optimizer rollback debug
+    # if args.curr_iteration > 0:
+    #     optimizer.save_parameters_backup()
+    #     update_successful, grad_norm, num_zeros_in_grad = optimizer_helper_step(optimizer, args, timers)
+    #     rollback_optimizer_step(optimizer.optimizer)
+    #     optimizer.rollback_parameters()
+    #     update_successful, grad_norm, num_zeros_in_grad = optimizer.step(args, timers)
+    # else:
+    #     update_successful, grad_norm, num_zeros_in_grad = optimizer.step(args, timers)
+
     # ------------------------- JINDA_DEBUG for optimizer step -------------------------
     timers('optimizer').stop()
+
+    if fast_slow_grad_reduce_helper is not None:
+        # do_high_precision_grad_optimizer_step_for_curr_iter = (grad_norm + 1.0e-6 < optimizer.clip_grad and update_successful)
+        do_high_precision_grad_optimizer_step_for_curr_iter = update_successful
+        fast_slow_grad_reduce_helper.set_last_iter_total_norm(grad_norm)
+        fast_slow_grad_reduce_helper.set_last_iter_updated_successfully(do_high_precision_grad_optimizer_step_for_curr_iter)
+
+        if do_high_precision_grad_optimizer_step_for_curr_iter is True:
+            # Optimizer State rollback.
+            # if rank == 0:
+                # print(f'JINDA_DEBUG: start rollback_optimizer_step')
+            # rollback_optimizer_step(optimizer.optimizer)
+            optimizer.rollback_parameters()
+            for group_index, param_group in enumerate(optimizer.optimizer.param_groups):
+                if step_list_copy[group_index] is not None:
+                    param_group['step'] = step_list_copy[group_index]
+                else:
+                    param_group.pop('step', None)
+            # if rank == 0:
+            #     print(f'rollback_optimizer_step finished')
+
+    # for group_index, param_group in enumerate(optimizer.optimizer.param_groups):
+    #     if 'step' in param_group:
+    #         step = param_group['step']
+    #         print(f'JINDA_DEBUG after optimizer step, iter: {args.curr_iteration}, rank: {rank}, group_index: {group_index},   param step:{step}')
+    #     else:
+    #         print(f'JINDA_DEBUG after optimizer step, iter: {args.curr_iteration}, rank: {rank}, group_index: {group_index},   param step: None')
 
     # Vision momentum.
     if args.vision_pretraining and args.vision_pretraining_type == "dino":
