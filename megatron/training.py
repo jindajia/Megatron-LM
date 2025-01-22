@@ -569,6 +569,7 @@ def train_step(forward_step_func, data_iterator,
     else:
         rank = 0
 
+    timers('optimizer-roll-back', log_level=1).start(barrier=args.barrier_with_L1_time)
     if fast_slow_grad_reduce_helper is not None:
         if  fast_slow_grad_reduce_helper.last_iter_updated_successfully is True:
             for group_index, param_group in enumerate(optimizer.optimizer.param_groups):
@@ -585,7 +586,8 @@ def train_step(forward_step_func, data_iterator,
                 step_list_copy.append(param_group['step'])
             else:
                 step_list_copy.append(None)
-    
+    timers('optimizer-roll-back').stop()
+
     # for group_index, param_group in enumerate(optimizer.optimizer.param_groups):
     #     if 'step' in param_group:
     #         step = param_group['step']
@@ -615,6 +617,7 @@ def train_step(forward_step_func, data_iterator,
     # ------------------------- JINDA_DEBUG for optimizer step -------------------------
     timers('optimizer').stop()
 
+    timers('optimizer-roll-back', log_level=1).start(barrier=args.barrier_with_L1_time)
     if fast_slow_grad_reduce_helper is not None:
         # do_high_precision_grad_optimizer_step_for_curr_iter = (grad_norm + 1.0e-6 < optimizer.clip_grad and update_successful)
         do_high_precision_grad_optimizer_step_for_curr_iter = update_successful
@@ -634,7 +637,7 @@ def train_step(forward_step_func, data_iterator,
                     param_group.pop('step', None)
             # if rank == 0:
             #     print(f'rollback_optimizer_step finished')
-
+    timers('optimizer-roll-back').stop()
     # for group_index, param_group in enumerate(optimizer.optimizer.param_groups):
     #     if 'step' in param_group:
     #         step = param_group['step']
@@ -734,6 +737,7 @@ def training_log(loss_dict, total_loss_dict, learning_rate, iteration,
         'optimizer-count-zeros',
         'optimizer-inner-step',
         'optimizer-copy-main-to-model-params',
+        'optimizer-roll-back',
         'optimizer']
 
     # Calculate batch size.
@@ -988,14 +992,28 @@ def train(forward_step_func, model, optimizer, opt_param_scheduler,
             'Manual garbage collection interval should be laerger than or equal to 0.'
         gc.disable()
         gc.collect()
+    
+    prof = None
+    if args.profile and torch.distributed.get_rank() in args.profile_ranks and args.use_pytorch_profiler:
+        prof = torch.profiler.profile(
+        schedule=torch.profiler.schedule(
+            wait=max(args.profile_step_start-1, 0),
+            warmup=1 if args.profile_step_start > 0 else 0,
+            active=args.profile_step_end-args.profile_step_start,
+            repeat=1),
+        on_trace_ready=torch.profiler.tensorboard_trace_handler(args.tensorboard_dir),
+        record_shapes=True,
+        with_stack=True)
+        prof.start()
 
     num_microbatches = get_num_microbatches()
     while iteration < args.train_iters:
-        if args.profile and \
-           iteration == args.profile_step_start and \
-           torch.distributed.get_rank() in args.profile_ranks:
-            torch.cuda.cudart().cudaProfilerStart()
-            torch.autograd.profiler.emit_nvtx(record_shapes=True).__enter__()
+        if args.profile and torch.distributed.get_rank() in args.profile_ranks:
+            if args.use_pytorch_profiler:
+                prof.step()
+            elif iteration == args.profile_step_start:
+                torch.cuda.cudart().cudaProfilerStart()
+                torch.autograd.profiler.emit_nvtx(record_shapes=True).__enter__()
 
         # Update number of microbatches first without consistency check to decide if a
         # checkpoint should be saved. If the number of microbatches is different
@@ -1116,9 +1134,14 @@ def train(forward_step_func, model, optimizer, opt_param_scheduler,
             break
 
         if args.profile and \
-           iteration == args.profile_step_end and \
-           torch.distributed.get_rank() in args.profile_ranks:
-            torch.cuda.cudart().cudaProfilerStop()
+            iteration == args.profile_step_end and \
+            torch.distributed.get_rank() in args.profile_ranks:
+            if args.use_pytorch_profiler:
+                assert prof is not None
+                prof.stop()
+            else:
+                torch.cuda.cudart().cudaProfilerStop()
+
 
         if args.manual_gc:
             if args.manual_gc_interval != 0 and iteration % args.manual_gc_interval == 0:

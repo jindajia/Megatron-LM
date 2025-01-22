@@ -11,10 +11,11 @@ logging.debug("Logging is configured correctly")
 
 class FastSlowGradReduceHelper:
     
-    def __init__(self, optimizer=None):
+    def __init__(self, optimizer=None, device=None):
         self.optimizer = optimizer
         self.last_iter_updated_successfully = False
         self.last_iter_total_norm = None
+        self.device = device
     
     def set_optimizer(self, optimizer):
         self.optimizer = optimizer
