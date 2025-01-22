@@ -406,7 +406,7 @@ def get_model(model_provider_func, model_type=ModelType.encoder_or_decoder, wrap
                                                     gradient_alltoall_pipeline=args.gradient_alltoall_pipeline)
     fast_slow_grad_reduce_helper = None
     if args.fast_slow_grad_reduce:
-        fast_slow_grad_reduce_helper = FastSlowGradReduceHelper()
+        fast_slow_grad_reduce_helper = FastSlowGradReduceHelper(device=args.high_precision_grad_device)
 
     if wrap_with_ddp:
         config = get_model_config(model[0])

@@ -1194,6 +1194,8 @@ def _add_distributed_args(parser):
     group.add_argument('--fast-slow-grad-reduce', action='store_true',
                        default=False,
                        help='If true, gradient reduce-scatter will happen twice, first is low precision, second is high precision.')
+    group.add_argument('--high-precision-grad-device',  type=str, default='cuda',
+                       help='Device to store high precision gradient buffer.')
     return parser
 
 def _add_quantize_args(parser):

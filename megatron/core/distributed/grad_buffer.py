@@ -342,9 +342,9 @@ class Bucket:
                 # (gbuf_index, dtype, bucket_index) = bucket_map_to_global_idx[self]
                 # print(f'JINDA_DEBUG: copy data to stale bucket, gbuf_idx: {gbuf_index}, bucket_idx: {bucket_index}, stale_bucket_norm: {torch.norm(self.stale_bucket.data)}', flush=True)
             self.start_grad_sync()
-            if self.stale_bucket is not None:
-                # self.stale_bucket.data.copy_(self.data)
-                self.stale_bucket.start_grad_sync()
+            # if self.stale_bucket is not None:
+            #     # self.stale_bucket.data.copy_(self.data)
+            #     self.stale_bucket.start_grad_sync()
 
 
 class GradBuffer:

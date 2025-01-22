@@ -1326,6 +1326,7 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
                 all_gather_handle_index = self.param_to_all_gather_handle_index_map[param]
                 self._finish_param_sync_helper(all_gather_handle_index)
 
+
         return hook
 
     def finish_param_sync(self, model_index, *unused):
@@ -1367,7 +1368,9 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
             next_all_gather_handle_index = all_gather_handle_index + 1
             if next_all_gather_handle_index < self.num_all_gather_handles:
                 self._dispatch_gather_model_params(next_all_gather_handle_index)
-
+            if next_all_gather_handle_index == self.num_all_gather_handles:
+                for grad_buffer_idx, grad_buffer in enumerate(self.grad_buffers):
+                    grad_buffer.start_stale_grad_sync()
         # Also check if we have already copied from the param buffer for this
         # handle; if not, complete the copy and mark as such.
         if not self.param_buffer_copied[all_gather_handle_index]:
