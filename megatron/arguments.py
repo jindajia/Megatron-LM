@@ -1139,7 +1139,6 @@ def _add_distributed_args(parser):
                        help='overlap pipeline parallel communication with forward and backward chunks',
                        dest='overlap_p2p_comm')
     group.add_argument('--distributed-backend', default='nccl',
-                       choices=['nccl', 'gloo'],
                        help='Which backend to use for distributed training.')
     group.add_argument('--distributed-timeout-minutes', type=int, default=10,
                        help='Timeout minutes for torch.distributed.')
@@ -1194,7 +1193,7 @@ def _add_distributed_args(parser):
     group.add_argument('--fast-slow-grad-reduce', action='store_true',
                        default=False,
                        help='If true, gradient reduce-scatter will happen twice, first is low precision, second is high precision.')
-    group.add_argument('--high-precision-grad-device',  type=str, default='cuda',
+    group.add_argument('--high-precision-grad-device',  type=str, default='cpu',
                        help='Device to store high precision gradient buffer.')
     return parser
 

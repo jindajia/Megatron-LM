@@ -15,7 +15,7 @@ class FastSlowGradReduceHelper:
         self.optimizer = optimizer
         self.last_iter_updated_successfully = False
         self.last_iter_total_norm = None
-        self.device = device
+        self.high_precision_grad_device = device
     
     def set_optimizer(self, optimizer):
         self.optimizer = optimizer

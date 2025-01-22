@@ -175,7 +175,7 @@ class QuantizationHelper:
 
         return received_buffer
 
-    def quantize_reduce_gradients(self, tensor, received_buffer=None):
+    def quantize_reduce_gradients(self, tensor, received_buffer=None, stale_handle_event=None):
         world_size = torch.distributed.get_world_size(group=self.data_parallel_group)
         # when grad type float16, should use fp32 to do transformation and quantization
         if _GRADIENT_COMM_DEBUG == 1:
@@ -192,7 +192,7 @@ class QuantizationHelper:
         if original_grad_type is not torch.float32:
             tensor = tensor.to(torch.float32)
 
-        self.quantized_reduce_scatter(tensor, received_buffer)
+        self.quantized_reduce_scatter(tensor, received_buffer, stale_handle_event)
 
         if _GRADIENT_COMM_DEBUG == 1:
             diff = received_buffer - reduced_tensor
@@ -249,7 +249,7 @@ class QuantizationHelper:
 
         return original_tensor.view(-1)
 
-    def quantized_reduce_scatter_intra_and_inter(self, tensor, received_buffer):
+    def quantized_reduce_scatter_intra_and_inter(self, tensor, received_buffer, stale_handle_event=None):
         assert tensor.numel() % self.gq_group_size_inter == 0 # tensor size must be multiple of group size
         assert self.gq_group_size_inter  % (8 // min(self.gradient_quantization_bits_inter, self.gradient_quantization_bits_intra)) == 0 # group size must be multiple of 2 when using 4bits
         assert self.gq_group_size_inter % 8 == 0 # group size must be multiple of 8 when tensor is half type; must be multiple of 4 when type is float. 
@@ -320,6 +320,8 @@ class QuantizationHelper:
                 all_to_all_single(all_to_all_output_scales, quant_scales, group=groups[f'global_{pp_rank}_{tp_rank}_{inter_idx}'])
 
                 """dequantizeReduction"""
+                if stale_handle_event is not None:
+                    stale_handle_event.wait() 
                 pipeline_received_buffer_view = pipeline_received_buffer_view_list[i]
                 final_dequant(all_to_all_output_tensor, 
                                 all_to_all_output_scales, 
@@ -332,7 +334,7 @@ class QuantizationHelper:
             torch.cuda.current_stream().wait_stream(stream)
         return received_buffer
 
-    def quantized_reduce_scatter_intra_only(self, tensor, received_buffer):
+    def quantized_reduce_scatter_intra_only(self, tensor, received_buffer, stale_handle_event=None):
         assert tensor.numel() % self.gq_group_size_inter == 0 # tensor size must be multiple of group size
         assert self.gq_group_size_inter  % (8 // min(self.gradient_quantization_bits_inter, self.gradient_quantization_bits_intra)) == 0 # group size must be multiple of 2 when using 4bits
         assert self.gq_group_size_inter % 8 == 0 # group size must be multiple of 8 when tensor is half type; must be multiple of 4 when type is float. 
@@ -370,6 +372,8 @@ class QuantizationHelper:
         all_to_all_single(all_to_all_output_tensor, quant_tensor, group=groups[f'local_{pp_rank}_{tp_rank}_{intra_idx}'])
         all_to_all_single(all_to_all_output_scales, quant_scales, group=groups[f'local_{pp_rank}_{tp_rank}_{intra_idx}'])
 
+        if stale_handle_event is not None:
+            stale_handle_event.wait()
         final_dequant(all_to_all_output_tensor, 
                         all_to_all_output_scales, 
                         received_buffer, 
@@ -379,7 +383,7 @@ class QuantizationHelper:
                         intra_dp_size)
         return received_buffer
 
-    def quantized_reduce_scatter_inter_only(self, tensor, received_buffer):
+    def quantized_reduce_scatter_inter_only(self, tensor, received_buffer, stale_handle_event=None):
         assert tensor.numel() % self.gq_group_size_inter == 0 # tensor size must be multiple of group size
         assert self.gq_group_size_inter  % (8 // min(self.gradient_quantization_bits_inter, self.gradient_quantization_bits_intra)) == 0 # group size must be multiple of 2 when using 4bits
         assert self.gq_group_size_inter % 8 == 0 # group size must be multiple of 8 when tensor is half type; must be multiple of 4 when type is float. 
@@ -416,6 +420,8 @@ class QuantizationHelper:
         all_to_all_single(all_to_all_output_tensor, quant_tensor, group=groups[f'global_{pp_rank}_{tp_rank}_{inter_idx}'])
         all_to_all_single(all_to_all_output_scales, quant_scales, group=groups[f'global_{pp_rank}_{tp_rank}_{inter_idx}'])
 
+        if stale_handle_event is not None:
+            stale_handle_event.wait()
         """dequantizeReduction"""
         final_dequant(all_to_all_output_tensor, 
                         all_to_all_output_scales, 
@@ -426,13 +432,13 @@ class QuantizationHelper:
                         inter_dp_size)
         return received_buffer
         
-    def quantized_reduce_scatter(self, tensor, received_buffer):
+    def quantized_reduce_scatter(self, tensor, received_buffer, stale_handle_event=None):
         if self.intra_dp_size > 1 and self.inter_dp_size > 1:
-            return self.quantized_reduce_scatter_intra_and_inter(tensor, received_buffer)
+            return self.quantized_reduce_scatter_intra_and_inter(tensor, received_buffer, stale_handle_event)
         elif self.intra_dp_size > 1:
-            return self.quantized_reduce_scatter_intra_only(tensor, received_buffer)
+            return self.quantized_reduce_scatter_intra_only(tensor, received_buffer, stale_handle_event)
         elif self.inter_dp_size > 1:
-            return self.quantized_reduce_scatter_inter_only(tensor, received_buffer)
+            return self.quantized_reduce_scatter_inter_only(tensor, received_buffer, stale_handle_event)
         else:
             received_buffer.copy_(tensor)
             return received_buffer
