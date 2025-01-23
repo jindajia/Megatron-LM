@@ -1420,8 +1420,8 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
                 assert model_param.stale_grad.data.is_contiguous()
                 model_grad = model_param.stale_grad
                 shard_model_grad = model_grad.view(-1)[param_range.start : param_range.end]
-                # shard_main_param.grad = shard_model_grad.to(device=device, dtype=torch.float32, non_blocking=True)
-                shard_main_param.grad = shard_model_grad.cuda().float() 
+                shard_main_param.grad = shard_model_grad.to(device=device, dtype=torch.float32, non_blocking=True)
+                # shard_main_param.grad = shard_model_grad.cuda().float() 
                 # shard_main_param.grad.copy_(shard_model_grad.cuda().float()) JINDA_DEBUG
         
         
@@ -1429,6 +1429,24 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
         for group_index, param_group in enumerate(self.optimizer.param_groups):
             copy_this_group_grads(self.bucket_wise_model_float16_groups.get((gbuf_index, dtype, bucket_index, group_index), []), self.bucket_wise_shard_fp32_from_float16_groups.get((gbuf_index, dtype, bucket_index, group_index), []))
             copy_this_group_grads(self.bucket_wise_model_fp32_groups.get((gbuf_index, dtype, bucket_index, group_index), []), self.bucket_wise_shard_fp32_groups.get((gbuf_index, dtype, bucket_index, group_index), []))
+
+    def zero_shard_main_grad(self, set_to_none=True):
+        """
+        Zero grads.
+
+        We only need to zero the model related parameters, i.e.,
+        model_float16_groups & model_fp32_groups. We additionally zero
+        the remaining groups as a memory optimization to reduce
+        fragmentation; in the case of set_to_none==True, the space
+        used by this field can be safely deallocated at this point.
+        """
+        for groups in (
+            self.shard_float16_groups,  # grad empty/unused here?
+            self.shard_fp32_groups,  # throws grad-access warning
+            self.shard_fp32_from_float16_groups,
+        ):
+            for group in groups:
+                _zero_grad_group_helper(group, set_to_none)
 
     def _collect_main_grad_data_for_unscaling(self):
         """

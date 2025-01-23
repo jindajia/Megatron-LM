@@ -43,6 +43,9 @@ class FastSlowGradReduceHelper:
 
         (gbuf_index, dtype, bucket_index) = bucket_map_to_global_idx[bucket]
         self.optimizer.copy_high_precision_grads_to_main_grads_each_bucket(gbuf_index, dtype, bucket_index)
+    
+    def zero_optimizer_shard_grad(self):
+        self.optimizer.zero_shard_main_grad()
 
 def optimizer_helper_step(optimizer, args, timers):
 
