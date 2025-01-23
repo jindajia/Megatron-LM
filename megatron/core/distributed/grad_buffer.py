@@ -131,11 +131,12 @@ class StaleBucket:
                 # print('JINDA_DEBUG: StaleBucket start_grad_sync() CPU', flush=True)
                 # self.data /= self.data_parallel_world_size
                 # torch.cuda.synchronize()
+                stream.wait_stream(torch.cuda.default_stream())
                 with torch.cuda.stream(stream):
                     torch.distributed.all_reduce(
                         self.data,
                         group=self.data_parallel_group,
-                        async_op=False,
+                        async_op=True,
                     )
                     event.record()
 
