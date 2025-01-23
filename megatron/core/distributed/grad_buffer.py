@@ -53,6 +53,8 @@ class StaleBucket:
         data_parallel_world_size: int,
         grad_reduce_stream: torch.cuda.Stream,
         use_distributed_optimizer: bool,
+        fast_slow_grad_reduce_helper = None,
+        parent_bucket = None,
     ):
         # State for bookkeeping: params is the set of parameters this bucket is
         # responsible for, params_with_grad is the set of parameters with grads
@@ -74,6 +76,8 @@ class StaleBucket:
         self.use_distributed_optimizer = use_distributed_optimizer
         assert isinstance(grad_reduce_stream, torch.cuda.Stream)
         self.comm_stream = grad_reduce_stream
+        self.fast_slow_grad_reduce_helper = fast_slow_grad_reduce_helper
+        self.parent_bucket = parent_bucket
         self.reset()
 
     def reset(self):
@@ -102,10 +106,13 @@ class StaleBucket:
 
         if self.use_distributed_optimizer:
             if self.data.device.type == 'cuda':
-                self.data /= self.data_parallel_world_size
+                # self.data /= self.data_parallel_world_size
+                
                 local_data_view = shard_buffer(self.data, self.data_parallel_world_size)[
                     self.data_parallel_rank
                 ]
+                parent_bucket = self.parent_bucket
+                fast_slow_grad_reduce_helper = self.fast_slow_grad_reduce_helper
                 stream.wait_stream(torch.cuda.default_stream())
                 with torch.cuda.stream(stream):
                     torch.distributed._reduce_scatter_base(
@@ -114,17 +121,24 @@ class StaleBucket:
                         group=self.data_parallel_group,
                         async_op=False,
                     )
+                    # print(f'JINDA_DEBUG: StaleBucket start_grad_sync() GPU', flush=True)
+                    # fast_slow_grad_reduce_helper.bucket_wise_copy_high_precision_grads_to_main_grads_each_bucket(parent_bucket)
+                    # torch.cuda.synchronize()
+                    # self.fast_slow_grad_reduce_helper.bucket_wise_optimizer_step(self.parent_bucket)
                     # self.reduced_grads = local_data_view.clone() # DEBUG_ONLY
                     event.record()
             else:
                 # print('JINDA_DEBUG: StaleBucket start_grad_sync() CPU', flush=True)
-                self.data /= self.data_parallel_world_size
-                event = torch.distributed.all_reduce(
-                    self.data,
-                    group=self.data_parallel_group,
-                    async_op=True,
-                )
-                self.communication_event = event
+                # self.data /= self.data_parallel_world_size
+                # torch.cuda.synchronize()
+                with torch.cuda.stream(stream):
+                    torch.distributed.all_reduce(
+                        self.data,
+                        group=self.data_parallel_group,
+                        async_op=False,
+                    )
+                    event.record()
+
         else:
             stream.wait_stream(torch.cuda.default_stream())
             with torch.cuda.stream(stream):
@@ -266,7 +280,6 @@ class Bucket:
             else:
                 if stale_handle_event is not None:
                     stale_handle_event.wait()
-                    self.handle_for_stale_bucket_copy = None
                 
                 stream.wait_stream(torch.cuda.default_stream())
                 with torch.cuda.stream(stream):
@@ -336,29 +349,15 @@ class Bucket:
         if len(self.params_with_grad) == len(self.params):
 
 
-            if self.stale_bucket is not None and self.stale_bucket.communication_issued:
-                bucket_map_to_global_idx = self.fast_slow_grad_reduce_helper.optimizer.bucket_map_to_global_idx
-                (gbuf_index, dtype, bucket_index) = bucket_map_to_global_idx[self]
-                self.stale_bucket.finish_grad_sync()
-                self.handle_for_stale_bucket_copy = None
-                # if self.data_parallel_rank == 0: # DEBUG_ONLY
-                    # if self.last_iter_reduced_grads is not None and self.stale_bucket.reduced_grads is not None:
-                    #     rel_error = torch.norm(self.last_iter_reduced_grads - self.stale_bucket.reduced_grads) / torch.norm(self.stale_bucket.reduced_grads)
-                    #     print(f'JINDA_DEBUG rank{self.data_parallel_rank}: rel_error: {rel_error}, gbuf_idx: {gbuf_index}, bucket_idx: {bucket_index}', flush=True)
-                        # self.stale_bucket.reduced_grads.copy_(self.last_iter_reduced_grads)
-                self.stale_bucket.reset()
-                # print(f'JINDA_DEBUG: finish stale_bucket.reset', flush=True)
-                if self.fast_slow_grad_reduce_helper.last_iter_updated_successfully is True:
-                    # print(f'JINDA_DEBUG: fast_slow_grad_reduce_helper condition1', flush=True)
-                    # local_data_view = shard_buffer(self.stale_bucket.data, self.data_parallel_world_size)[
-                    #     self.data_parallel_rank
-                    # ]
-                    # print(f'JINDA_DEBUG: high precision reduce reduce sync!!! gbuf_idx: {gbuf_index}, bucket_idx: {bucket_index}, stale_bucket_norm: {torch.norm(local_data_view)}', flush=True)
-                    self.fast_slow_grad_reduce_helper.bucket_wise_copy_high_precision_grads_to_main_grads_each_bucket(self)
-                    self.fast_slow_grad_reduce_helper.bucket_wise_optimizer_step(self)
-                    # self.stale_bucket.data.zero_() # JINDA_DEBUG we may not need it.
             if self.stale_bucket is not None:
-                # self.stale_bucket.data.copy_(self.data)
+                if self.stale_bucket.communication_issued:
+                    bucket_map_to_global_idx = self.fast_slow_grad_reduce_helper.optimizer.bucket_map_to_global_idx
+                    (gbuf_index, dtype, bucket_index) = bucket_map_to_global_idx[self]
+                    self.stale_bucket.finish_grad_sync()
+                    self.stale_bucket.reset()
+                    if self.fast_slow_grad_reduce_helper and self.fast_slow_grad_reduce_helper.last_iter_updated_successfully:
+                        self.fast_slow_grad_reduce_helper.bucket_wise_copy_high_precision_grads_to_main_grads_each_bucket(self)
+                        self.fast_slow_grad_reduce_helper.bucket_wise_optimizer_step(self)
 
                 event = torch.cuda.Event()
                 self.handle_for_stale_bucket_copy = event
@@ -367,6 +366,7 @@ class Bucket:
                 temp_cuda_buffer = self.data.clone()
                 self.DtoH_stream.wait_stream(torch.cuda.default_stream())
                 with torch.cuda.stream(self.DtoH_stream):
+                    temp_cuda_buffer.div_(self.data_parallel_world_size)
                     self.stale_bucket.data.copy_(temp_cuda_buffer, non_blocking=True)
                     temp_cuda_buffer = None
                     event.record()
@@ -673,6 +673,8 @@ class GradBuffer:
                 data_parallel_world_size=self.data_parallel_world_size,
                 grad_reduce_stream=self.high_precision_slow_reduce_stream,
                 use_distributed_optimizer=self.use_distributed_optimizer,
+                fast_slow_grad_reduce_helper=self.fast_slow_grad_reduce_helper,
+                parent_bucket=bucket
             )
             bucket.set_stale_data_buffer(high_precision_grad_bucket)
             self.stale_buckets.append(high_precision_grad_bucket)
@@ -731,8 +733,16 @@ class GradBuffer:
         """
         # if torch.distributed.get_rank() == 0:
         #     print('GradBuffer start stale grad sync', flush=True)
-        for stale_bucket in self.stale_buckets:
-            stale_bucket.start_grad_sync()
+        if self.fast_slow_grad_reduce_helper and self.fast_slow_grad_reduce_helper.last_iter_updated_successfully:
+            # print("JINDA_DEBUG: start_stale_grad_sync() last_iter_updated_successfully is True", flush=True)
+            for stale_bucket in self.stale_buckets:
+                """Before starting high precision gradient reduce-scatter, we need to assure
+                that D2H copy of the high precision gradients is finished. This is because we
+                need to offload high precision gradients to CPU, to reduce the GPU memory usage."""
+                if stale_bucket.parent_bucket.handle_for_stale_bucket_copy is not None:
+                    stale_bucket.parent_bucket.handle_for_stale_bucket_copy.synchronize()
+                    stale_bucket.parent_bucket.handle_for_stale_bucket_copy = None
+                stale_bucket.start_grad_sync()
 
     def finish_stale_grad_sync(self):
         """
@@ -763,6 +773,10 @@ class GradBuffer:
             bucket.register_grad_ready(param)
     
     def start_using_temp_buffer(self, event):
+        """Since we need to offload high precision gradients to CPU, and this transfer is slow, we need to use a temp buffer 
+        to store the high precision gradients before offloading them to CPU. To reduce the GPU memory peak usage, at most one temp
+        buffer is used at a time. This function is used to indicate that the temp buffer is in use.
+        """
         assert self.temp_buffer_handle is None, 'temp_buffer_handle already in used, please wait until it finished'
         self.temp_buffer_handle = event
 

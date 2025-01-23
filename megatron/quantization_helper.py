@@ -372,8 +372,6 @@ class QuantizationHelper:
         all_to_all_single(all_to_all_output_tensor, quant_tensor, group=groups[f'local_{pp_rank}_{tp_rank}_{intra_idx}'])
         all_to_all_single(all_to_all_output_scales, quant_scales, group=groups[f'local_{pp_rank}_{tp_rank}_{intra_idx}'])
 
-        if stale_handle_event is not None:
-            stale_handle_event.wait()
         final_dequant(all_to_all_output_tensor, 
                         all_to_all_output_scales, 
                         received_buffer, 
@@ -420,8 +418,6 @@ class QuantizationHelper:
         all_to_all_single(all_to_all_output_tensor, quant_tensor, group=groups[f'global_{pp_rank}_{tp_rank}_{inter_idx}'])
         all_to_all_single(all_to_all_output_scales, quant_scales, group=groups[f'global_{pp_rank}_{tp_rank}_{inter_idx}'])
 
-        if stale_handle_event is not None:
-            stale_handle_event.wait()
         """dequantizeReduction"""
         final_dequant(all_to_all_output_tensor, 
                         all_to_all_output_scales, 

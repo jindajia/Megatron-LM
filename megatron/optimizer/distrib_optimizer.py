@@ -1409,6 +1409,8 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
 
     def copy_high_precision_grads_to_main_grads_each_bucket(self, gbuf_index, dtype, bucket_index):
 
+        assert torch.cuda.is_available()
+        device = torch.device("cuda", torch.cuda.current_device())
         def copy_this_group_grads(model_group, shard_main_group):
             for model_param, shard_main_param in zip(model_group, shard_main_group):
 
@@ -1418,10 +1420,12 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
                 assert model_param.stale_grad.data.is_contiguous()
                 model_grad = model_param.stale_grad
                 shard_model_grad = model_grad.view(-1)[param_range.start : param_range.end]
+                # shard_main_param.grad = shard_model_grad.to(device=device, dtype=torch.float32, non_blocking=True)
                 shard_main_param.grad = shard_model_grad.cuda().float() 
                 # shard_main_param.grad.copy_(shard_model_grad.cuda().float()) JINDA_DEBUG
         
         
+        # print_rank_0(f"JINDA_DEBUG copy_high_precision_grads_to_main_grads_each_bucket: gbuf_index: {gbuf_index}, dtype: {dtype}, bucket_index: {bucket_index}")
         for group_index, param_group in enumerate(self.optimizer.param_groups):
             copy_this_group_grads(self.bucket_wise_model_float16_groups.get((gbuf_index, dtype, bucket_index, group_index), []), self.bucket_wise_shard_fp32_from_float16_groups.get((gbuf_index, dtype, bucket_index, group_index), []))
             copy_this_group_grads(self.bucket_wise_model_fp32_groups.get((gbuf_index, dtype, bucket_index, group_index), []), self.bucket_wise_shard_fp32_groups.get((gbuf_index, dtype, bucket_index, group_index), []))
