@@ -111,8 +111,7 @@ class StaleBucket:
                 local_data_view = shard_buffer(self.data, self.data_parallel_world_size)[
                     self.data_parallel_rank
                 ]
-                parent_bucket = self.parent_bucket
-                fast_slow_grad_reduce_helper = self.fast_slow_grad_reduce_helper
+
                 stream.wait_stream(torch.cuda.default_stream())
                 with torch.cuda.stream(stream):
                     torch.distributed._reduce_scatter_base(
