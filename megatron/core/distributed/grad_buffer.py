@@ -357,6 +357,8 @@ class Bucket:
                     self.HtoD_stream.wait_stream(torch.cuda.default_stream())
                     with torch.cuda.stream(self.HtoD_stream):
                         self.fast_slow_grad_reduce_helper.bucket_wise_copy_high_precision_grads_to_main_grads_each_bucket(self)
+                        self.fast_slow_grad_reduce_helper.bucket_wise_optimizer_step(self)
+                        self.fast_slow_grad_reduce_helper.zero_optimizer_shard_grad()
                         self.bucket_wise_optimizer_event.record()
         # If all params in bucket have grads available, issue communication call.
         if len(self.params_with_grad) == len(self.params):
@@ -374,9 +376,8 @@ class Bucket:
                 if self.bucket_wise_optimizer_event is not None:
                     self.bucket_wise_optimizer_event.wait()
                     self.bucket_wise_optimizer_event = None
-                if self.fast_slow_grad_reduce_helper and self.fast_slow_grad_reduce_helper.last_iter_updated_successfully:
-                        self.fast_slow_grad_reduce_helper.bucket_wise_optimizer_step(self)
-                        self.fast_slow_grad_reduce_helper.zero_optimizer_shard_grad()
+                # if self.fast_slow_grad_reduce_helper and self.fast_slow_grad_reduce_helper.last_iter_updated_successfully:
+
                 event = torch.cuda.Event()
                 self.handle_for_stale_bucket_copy = event
                 self.parent_ref.finsh_using_shared_temp_buffer()

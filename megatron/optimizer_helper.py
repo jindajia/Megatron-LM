@@ -350,7 +350,8 @@ def clip_grad_norm_fp32_with_pregiven_totalnorm(
     clip_coeff = max_norm / (total_norm + 1.0e-6)
     # print(f'JINDA_DEBUG: condition6.2 clip_coeff={clip_coeff}')
     if clip_coeff < 1.0:
-        dummy_overflow_buf = torch.tensor([0], dtype=torch.int, device='cuda')
+        # dummy_overflow_buf = torch.tensor([0], dtype=torch.int, device='cuda') # this will call cpu synchronize in background.
+        dummy_overflow_buf = torch.zeros(1, dtype=torch.int, device='cuda')
         multi_tensor_applier(
             amp_C.multi_tensor_scale, dummy_overflow_buf, [grads, grads], clip_coeff
         )

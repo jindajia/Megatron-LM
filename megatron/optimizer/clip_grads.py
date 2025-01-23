@@ -74,7 +74,8 @@ def clip_grad_norm_fp32(
 
     else:
         if norm_type == 2.0:
-            dummy_overflow_buf = torch.tensor([0], dtype=torch.int, device='cuda')
+            # dummy_overflow_buf = torch.tensor([0], dtype=torch.int, device='cuda')
+            dummy_overflow_buf = torch.zeros(1, dtype=torch.int, device='cuda')
             # Use apex's multi-tensor applier for efficiency reasons.
             # Multi-tensor applier takes a function and a list of list
             # and performs the operation on that list all in one kernel.
@@ -86,7 +87,8 @@ def clip_grad_norm_fp32(
                     False,  # no per-parameter norm
                 )
             else:
-                grad_norm = torch.tensor([0], dtype=torch.float, device='cuda')
+                # grad_norm = torch.tensor([0], dtype=torch.float, device='cuda')
+                grad_norm = torch.zeros(1, dtype=torch.int, device='cuda')
             # Since we will be summing across data parallel groups,
             # we need the pow(norm-type).
             total_norm = grad_norm ** norm_type
