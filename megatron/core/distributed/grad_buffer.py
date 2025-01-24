@@ -379,16 +379,20 @@ class Bucket:
                 # if self.fast_slow_grad_reduce_helper and self.fast_slow_grad_reduce_helper.last_iter_updated_successfully:
 
                 event = torch.cuda.Event()
+                event_temp_copy = torch.cuda.Event()
                 self.handle_for_stale_bucket_copy = event
-                self.parent_ref.finsh_using_shared_temp_buffer()
-                self.parent_ref.start_using_temp_buffer(event)
-                temp_cuda_buffer = self.data.clone()
+                # self.parent_ref.finsh_using_shared_temp_buffer()
+                # self.parent_ref.start_using_temp_buffer(event)
                 self.DtoH_stream.wait_stream(torch.cuda.default_stream())
                 with torch.cuda.stream(self.DtoH_stream):
+                    temp_cuda_buffer = self.data.clone()
+                    event_temp_copy.record()
                     temp_cuda_buffer.div_(self.data_parallel_world_size)
                     self.stale_bucket.data.copy_(temp_cuda_buffer, non_blocking=True)
                     temp_cuda_buffer = None
                     event.record()
+                
+                event_temp_copy.wait()
                 # torch.cuda.synchronize()
                 # bucket_map_to_global_idx = self.fast_slow_grad_reduce_helper.optimizer.bucket_map_to_global_idx
                 # (gbuf_index, dtype, bucket_index) = bucket_map_to_global_idx[self]
@@ -609,8 +613,8 @@ class GradBuffer:
                 end_index=bucket_data_end_index,
                 numel_unpadded=per_bucket_numel_unpadded[cur_bucket_id],
                 bucket_id=cur_bucket_id,
-                DtoH_stream=DtoH_stream,
-                HtoD_stream=HtoD_stream,
+                DtoH_stream=torch.cuda.Stream(),
+                HtoD_stream=torch.cuda.Stream(),
             )
 
         if not overlap_grad_reduce:

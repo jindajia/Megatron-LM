@@ -239,7 +239,7 @@ def optimizer_helper_bucket_wise_inner_step(optimizer, gbuf_index, dtype, bucket
     # print(f'JINDA_DEBUG: condition4')
 
     assert isinstance(optimizer, DistributedOptimizer)
-    assert pre_given_total_norm is not None, "pre_given_total_norm need to be given, will be used for gradient clip"
+    # assert pre_given_total_norm is not None, "pre_given_total_norm need to be given, will be used for gradient clip"
     # print(f'JINDA_DEBUG: condition5')
 
     """Copy step size for each param_group"""
@@ -259,19 +259,20 @@ def optimizer_helper_bucket_wise_inner_step(optimizer, gbuf_index, dtype, bucket
         ]
     # print(f'JINDA_DEBUG: condition6')
 
-    """Clip grad for bucket-wise"""
-    params = optimizer.get_parameters()
-    grads_for_norm = optimizer.get_main_grads_for_grad_norm()
-    # print(f'JINDA_DEBUG: condition6.1 total_norm={pre_given_total_norm}')
-    clip_grad_norm_fp32_with_pregiven_totalnorm(
-        params,
-        grads_for_norm,
-        optimizer.clip_grad,
-        optimizer.check_for_nan_in_grad,
-        model_parallel_group=optimizer.get_model_parallel_group(),
-        total_norm=pre_given_total_norm,
-    )
-    # print(f'JINDA_DEBUG: condition7')
+    if pre_given_total_norm is not None:
+        """Clip grad for bucket-wise"""
+        params = optimizer.get_parameters()
+        grads_for_norm = optimizer.get_main_grads_for_grad_norm()
+        # print(f'JINDA_DEBUG: condition6.1 total_norm={pre_given_total_norm}')
+        clip_grad_norm_fp32_with_pregiven_totalnorm(
+            params,
+            grads_for_norm,
+            optimizer.clip_grad,
+            optimizer.check_for_nan_in_grad,
+            model_parallel_group=optimizer.get_model_parallel_group(),
+            total_norm=pre_given_total_norm,
+        )
+        # print(f'JINDA_DEBUG: condition7')
 
     """Step optimizer for bucket-wise"""
     optimizer.optimizer.step()
