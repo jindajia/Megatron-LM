@@ -16,7 +16,7 @@ module list
 
 # ------------------ Set Dist arguments ------------------ #
 NNODES=$SLURM_NNODES
-GPUS_PER_NODE=0
+GPUS_PER_NODE=8
 MASTER_PORT=6000
 WORLD_SIZE=$(($GPUS_PER_NODE*$NNODES))
 
