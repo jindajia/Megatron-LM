@@ -48,6 +48,7 @@ class DistributedDataParallel(MegatronModule):
         disable_bucketing: bool = False,
         bucket_size: int = 40000000,
         quantization_helper: QuantizationHelper = None,
+        fast_slow_grad_reduce_helper = None,
     ):
         super().__init__(config=config)
         self.module = module
@@ -69,6 +70,7 @@ class DistributedDataParallel(MegatronModule):
             bucket_size = None
         self.bucket_size = bucket_size
         self.quantization_helper = quantization_helper
+        self.fast_slow_grad_reduce_helper = fast_slow_grad_reduce_helper
 
         self.module = module
         self.grad_buffers = {}
@@ -101,7 +103,8 @@ class DistributedDataParallel(MegatronModule):
                 param_to_name,
                 self.overlap_grad_reduce,
                 self.use_distributed_optimizer,
-                self.quantization_helper
+                self.quantization_helper,
+                self.fast_slow_grad_reduce_helper,
             )
             self.grad_buffer_param_index_map[dtype] = self.grad_buffers[dtype].param_index_map
             for param in params:

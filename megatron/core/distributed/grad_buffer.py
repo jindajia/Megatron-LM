@@ -25,6 +25,121 @@ def shard_buffer(buffer: torch.Tensor, data_parallel_world_size: int):
     return sharded_buffer
 
 
+class StaleBucket:
+    """
+    Bucket to keep track of a subset of the model's gradients. Provides functionality to register
+    when params in the bucket have grads ready to be synced; an asynchronous communication call
+    is automatically launched when _all_ params in the bucket have grads ready.
+
+    Arguments:
+        params: List of parameters whose gradients are collated in this bucket.
+        data: View in larger GradBuffer that this bucket is responsible for.
+        offset: Offset of this bucket's view in the larger GradBuffer.
+        numel_unpadded: Number of unpadded elements in bucket.
+        data_parallel_group: Data-parallel process group.
+        data_parallel_world_size: World size using the data-parallel group group.
+
+        use_distributed_optimizer: If true, issue reduce-scatter communication calls as part
+            of distributed optimizer. If false, issue all-reduce communication calls.
+    """
+
+    def __init__(
+        self,
+        params: List[torch.nn.Parameter],
+        data: torch.Tensor,
+        offset: int,
+        numel_unpadded: int,
+        data_parallel_group: torch.distributed.ProcessGroup,
+        data_parallel_world_size: int,
+        grad_reduce_stream: torch.cuda.Stream,
+        use_distributed_optimizer: bool,
+    ):
+        # State for bookkeeping: params is the set of parameters this bucket is
+        # responsible for, params_with_grad is the set of parameters with grads
+        # available. When overlap_grad_reduce is True, communication (all-reduce
+        # or reduce-scatter) is issued when params_with_grad equals params.
+        self.params_list = params
+        self.params = set(params)
+        self.params_with_grad = set()
+        self.data = data
+        self.stale_data_buffer = None
+        self.reduced_grads = None
+        # The distributed optimizer needs to keep track of this bucket's offset
+        # within the full grad_buffer.
+        self.offset = offset
+        self.numel_unpadded = numel_unpadded
+        self.data_parallel_group = data_parallel_group
+        self.data_parallel_world_size = data_parallel_world_size
+        self.data_parallel_rank = torch.distributed.get_rank(group=data_parallel_group)
+        self.use_distributed_optimizer = use_distributed_optimizer
+        assert isinstance(grad_reduce_stream, torch.cuda.Stream)
+        self.comm_stream = grad_reduce_stream
+        self.reset()
+
+    def reset(self):
+        """
+        Reset metadata in bucket in preparation for the next iteration of training.
+        """
+        self.params_with_grad = set()
+        self.communication_event: torch.cuda.Event = None
+        self.communication_issued = False
+
+    def start_grad_sync(self):
+        """
+        Initiates grad sync (all-reduce or reduce-scatter) communication operation
+        for this bucket.
+
+        """
+        assert (
+            self.communication_event is None and not self.communication_issued
+        ), 'Should not have multiple communication calls in flight at once'
+
+        stream = self.comm_stream
+        
+        event = torch.cuda.Event()
+        self.communication_event = event
+        self.communication_issued = True
+        self.data /= self.data_parallel_world_size
+
+        if self.use_distributed_optimizer:
+            local_data_view = shard_buffer(self.data, self.data_parallel_world_size)[
+                self.data_parallel_rank
+            ]
+            stream.wait_stream(torch.cuda.default_stream())
+            with torch.cuda.stream(stream):
+                torch.distributed._reduce_scatter_base(
+                    local_data_view,
+                    self.data,
+                    group=self.data_parallel_group,
+                    async_op=False,
+                )
+                # self.reduced_grads = local_data_view.clone() # DEBUG_ONLY
+                event.record()
+        else:
+            stream.wait_stream(torch.cuda.default_stream())
+            with torch.cuda.stream(stream):
+                torch.distributed.all_reduce(
+                    self.data, group=self.data_parallel_group, async_op=False
+                )
+                event.record()
+
+    def finish_grad_sync(self):
+        """
+        Finishes grad sync (all-reduce or reduce-scatter) communication operation
+        for this bucket.
+
+        """
+
+        assert self.communication_event is not None and self.communication_issued, (
+            f'Communication call has not been issued for this bucket '
+            f'({len(self.params_with_grad)}/{len(self.params)} params have grad available)'
+        )
+        self.communication_event.wait()
+        self.communication_event = None
+
+    # def call_optimizer_func(self):
+    #     self.optimizer_ref.copy_high_precision_grads_to_main_grads_each_bucket(self.gbuf_index, self.dtype, self.bucket_index)
+
 class Bucket:
     """
     Bucket to keep track of a subset of the model's gradients. Provides functionality to register
@@ -57,6 +172,7 @@ class Bucket:
         grad_reduce_stream: torch.cuda.Stream,
         use_distributed_optimizer: bool,
         quantization_helper: QuantizationHelper,
+        fast_slow_grad_reduce_helper = None,
     ):
         # State for bookkeeping: params is the set of parameters this bucket is
         # responsible for, params_with_grad is the set of parameters with grads
@@ -66,6 +182,9 @@ class Bucket:
         self.params = set(params)
         self.params_with_grad = set()
         self.data = data
+        self.stale_data_buffer = None
+        self.last_iter_reduced_grads = None
+        self.fast_slow_grad_reduce_helper = fast_slow_grad_reduce_helper
         # The distributed optimizer needs to keep track of this bucket's offset
         # within the full grad_buffer.
         self.offset = offset
@@ -76,6 +195,7 @@ class Bucket:
         self.overlap_grad_reduce = overlap_grad_reduce
         self.use_distributed_optimizer = use_distributed_optimizer
         self.quantization_helper = quantization_helper
+        self.stale_bucket = None
         if self.overlap_grad_reduce:
             assert isinstance(grad_reduce_stream, torch.cuda.Stream)
             self.comm_stream = grad_reduce_stream
@@ -90,6 +210,12 @@ class Bucket:
         self.params_with_grad = set()
         self.communication_event: torch.cuda.Event = None
         self.communication_issued = False
+
+    def set_stale_data_buffer(self, stale_bucket: StaleBucket):
+        """
+        Set stale data buffer for second time high precision gradient reduce-scatter.
+        """
+        self.stale_bucket = stale_bucket
 
     def start_grad_sync(self):
         """
@@ -119,6 +245,7 @@ class Bucket:
                 stream.wait_stream(torch.cuda.default_stream())
                 with torch.cuda.stream(stream):
                     self.quantization_helper.quantize_reduce_gradients(self.data, local_data_view)
+                    # self.last_iter_reduced_grads = local_data_view.clone() # DEBUG_ONLY
                     event.record()
             else:
                 stream.wait_stream(torch.cuda.default_stream())
@@ -160,6 +287,17 @@ class Bucket:
         self.communication_event.wait()
         self.communication_event = None
 
+        # if self.fast_slow_grad_reduce_helper is not None:
+        #     bucket_map_to_global_idx = self.fast_slow_grad_reduce_helper.optimizer.bucket_map_to_global_idx
+            # (gbuf_index, dtype, bucket_index) = bucket_map_to_global_idx[self]
+            # local_data_view = shard_buffer(self.data, self.data_parallel_world_size)[
+            #     self.data_parallel_rank
+            # ]
+            # print(f'JINDA_DEBUG: low precision reduce reduce sync!!! gbuf_idx: {gbuf_index}, bucket_idx: {bucket_index}, stale_bucket_norm: {torch.norm(local_data_view)}', flush=True)
+
+    def finish_stale_grad_sync(self):
+        self.stale_bucket.finish_grad_sync()
+
     def register_grad_ready(self, param: torch.nn.Parameter):
         """
         Registers grads for the passed-in param to be "ready" for grad sync.
@@ -175,7 +313,38 @@ class Bucket:
         self.params_with_grad.add(param)
         # If all params in bucket have grads available, issue communication call.
         if len(self.params_with_grad) == len(self.params):
+
+
+            if self.stale_bucket is not None and self.stale_bucket.communication_issued:
+                bucket_map_to_global_idx = self.fast_slow_grad_reduce_helper.optimizer.bucket_map_to_global_idx
+                (gbuf_index, dtype, bucket_index) = bucket_map_to_global_idx[self]
+                self.stale_bucket.finish_grad_sync()
+
+                # if self.data_parallel_rank == 0: # DEBUG_ONLY
+                    # if self.last_iter_reduced_grads is not None and self.stale_bucket.reduced_grads is not None:
+                    #     rel_error = torch.norm(self.last_iter_reduced_grads - self.stale_bucket.reduced_grads) / torch.norm(self.stale_bucket.reduced_grads)
+                    #     print(f'JINDA_DEBUG rank{self.data_parallel_rank}: rel_error: {rel_error}, gbuf_idx: {gbuf_index}, bucket_idx: {bucket_index}', flush=True)
+                        # self.stale_bucket.reduced_grads.copy_(self.last_iter_reduced_grads)
+                self.stale_bucket.reset()
+                # print(f'JINDA_DEBUG: finish stale_bucket.reset', flush=True)
+                if self.fast_slow_grad_reduce_helper.last_iter_updated_successfully is True:
+                    # print(f'JINDA_DEBUG: fast_slow_grad_reduce_helper condition1', flush=True)
+                    # local_data_view = shard_buffer(self.stale_bucket.data, self.data_parallel_world_size)[
+                    #     self.data_parallel_rank
+                    # ]
+                    # print(f'JINDA_DEBUG: high precision reduce reduce sync!!! gbuf_idx: {gbuf_index}, bucket_idx: {bucket_index}, stale_bucket_norm: {torch.norm(local_data_view)}', flush=True)
+                    self.fast_slow_grad_reduce_helper.bucket_wise_copy_high_precision_grads_to_main_grads_each_bucket(self)
+                    self.fast_slow_grad_reduce_helper.bucket_wise_optimizer_step(self)
+                    self.stale_bucket.data.zero_() # JINDA_DEBUG we may not need it.
+            if self.stale_bucket is not None:
+                self.stale_bucket.data.copy_(self.data)
+                # bucket_map_to_global_idx = self.fast_slow_grad_reduce_helper.optimizer.bucket_map_to_global_idx
+                # (gbuf_index, dtype, bucket_index) = bucket_map_to_global_idx[self]
+                # print(f'JINDA_DEBUG: copy data to stale bucket, gbuf_idx: {gbuf_index}, bucket_idx: {bucket_index}, stale_bucket_norm: {torch.norm(self.stale_bucket.data)}', flush=True)
             self.start_grad_sync()
+            if self.stale_bucket is not None:
+                # self.stale_bucket.data.copy_(self.data)
+                self.stale_bucket.start_grad_sync()
 
 
 class GradBuffer:
@@ -205,7 +374,8 @@ class GradBuffer:
         param_to_name: Dict[torch.nn.Parameter, str],
         overlap_grad_reduce: bool,
         use_distributed_optimizer: bool,
-        quantization_helper = QuantizationHelper
+        quantization_helper = None,
+        fast_slow_grad_reduce_helper = None,
     ):
 
         # Check that params are unique.
@@ -222,15 +392,20 @@ class GradBuffer:
             group=self.data_parallel_group
         )
         self.overlap_grad_reduce = overlap_grad_reduce
+        self.quantization_helper = quantization_helper
+        self.fast_slow_grad_reduce_helper = fast_slow_grad_reduce_helper
         self.grad_reduce_stream = None
+        self.high_precision_slow_reduce_stream = None
         if self.overlap_grad_reduce:
             self.grad_reduce_stream = torch.cuda.Stream()
+            if fast_slow_grad_reduce_helper is not None:
+                self.high_precision_slow_reduce_stream = torch.cuda.Stream()
         self.use_distributed_optimizer = use_distributed_optimizer
-        self.quantization_helper = quantization_helper
         self.is_last_microbatch = True
 
         # Data structures to store underlying buckets and relevant indexing data.
         self.buckets = []
+        self.stale_buckets = []
         self.param_to_bucket = {}  # Param -> bucket mapping.
         self.param_index_map = {}  # Param -> location in buffer mapping (used in dist. optimizer).
 
@@ -321,7 +496,14 @@ class GradBuffer:
         self.data = torch.zeros(
             self.numel, dtype=self.dtype, device=torch.cuda.current_device(), requires_grad=False,
         )
-
+        
+        self.grad_for_high_precision_reduce_data = None
+        if self.fast_slow_grad_reduce_helper is not None:
+            self.grad_for_high_precision_reduce_data = torch.zeros(
+                self.numel, dtype=self.dtype, device=torch.cuda.current_device(), requires_grad=False,
+            )
+        # torch.device('cpu')
+        
         # Finally, map main_grad fields for each parameter with a .grad field.
         bucket_params = set()
         bucket_data_start_index = 0
@@ -331,6 +513,8 @@ class GradBuffer:
                 continue
             data_start_index, data_end_index, bucket_id = self.param_index_map[param]
             param.main_grad = self._get(param.data.shape, data_start_index)
+            if self.fast_slow_grad_reduce_helper is not None:
+                param.stale_grad = self._get(param.data.shape, data_start_index, grad_for_high_precision_reduce=True)
             if bucket_id != cur_bucket_id:
                 bucket_data_end_index = _pad_if_needed(data_start_index)
                 self._set_bucket(
@@ -379,14 +563,17 @@ class GradBuffer:
                 for param in bucket.params:
                     logger.info(f'    {param_to_name[param]}')
 
-    def _get(self, shape: torch.Size, start_index: int) -> torch.Tensor:
+    def _get(self, shape: torch.Size, start_index: int, grad_for_high_precision_reduce=False) -> torch.Tensor:
         """
         Return a tensor with the input `shape` as a view into the 1-D data starting at
         `start_index`.
         """
         end_index = start_index + shape.numel()
         assert end_index <= self.numel, 'Requested tensor is out of buffer range'
-        buffer_tensor = self.data[start_index:end_index]
+        if grad_for_high_precision_reduce is False:
+            buffer_tensor = self.data[start_index:end_index]
+        else:
+            buffer_tensor = self.grad_for_high_precision_reduce_data[start_index:end_index]
         buffer_tensor = buffer_tensor.view(shape)
         return buffer_tensor
 
@@ -411,7 +598,7 @@ class GradBuffer:
         assert (start_index, end_index) == self.bucket_indices[bucket_id]
 
         # Get appropriate view into global GradBuffer.
-        bucket_data = self._get(torch.Size([end_index - start_index]), start_index)
+        bucket_data = self._get(torch.Size([end_index - start_index]), start_index, grad_for_high_precision_reduce=False)
         bucket = Bucket(
             params=bucket_params,
             data=bucket_data,
@@ -423,11 +610,26 @@ class GradBuffer:
             grad_reduce_stream=self.grad_reduce_stream,
             use_distributed_optimizer=self.use_distributed_optimizer,
             quantization_helper=self.quantization_helper,
+            fast_slow_grad_reduce_helper=self.fast_slow_grad_reduce_helper,
         )
         self.buckets.append(bucket)
         for bucket_param in bucket_params:
             assert bucket_param not in self.param_to_bucket
             self.param_to_bucket[bucket_param] = bucket
+        if self.fast_slow_grad_reduce_helper is not None:
+            high_precision_grad_data_buffer = self._get(torch.Size([end_index - start_index]), start_index, grad_for_high_precision_reduce=True)
+            high_precision_grad_bucket = StaleBucket(
+                params=bucket_params,
+                data=high_precision_grad_data_buffer,
+                offset=start_index,
+                numel_unpadded=numel_unpadded,
+                data_parallel_group=self.data_parallel_group,
+                data_parallel_world_size=self.data_parallel_world_size,
+                grad_reduce_stream=self.high_precision_slow_reduce_stream,
+                use_distributed_optimizer=self.use_distributed_optimizer,
+            )
+            bucket.set_stale_data_buffer(high_precision_grad_bucket)
+            self.stale_buckets.append(high_precision_grad_bucket)
 
     def reset(self, zero_buffer):
         """
@@ -441,6 +643,12 @@ class GradBuffer:
         for bucket in self.buckets:
             bucket.reset()
         self.is_last_microbatch = True
+
+    def reset_stale_buffer(self, zero_buffer):
+        if zero_buffer:
+            self.grad_for_high_precision_reduce_data.zero_()
+        for bucket in self.stale_buckets:
+            bucket.reset()
 
     def start_grad_sync(self):
         """
@@ -465,6 +673,34 @@ class GradBuffer:
         """
         for bucket in self.buckets:
             bucket.finish_grad_sync()
+
+    def start_stale_grad_sync(self):
+        """
+        Initiates grad sync (all-reduce or reduce-scatter) communication operations
+        for all buckets in the grad buffer.
+
+        When overlap_grad_reduce is set to True, dispatches asynchronous communication
+        calls. When overlap_grad_reduce is set to False, calls synchronous
+        communication ops.
+        """
+        # if torch.distributed.get_rank() == 0:
+        #     print('GradBuffer start stale grad sync', flush=True)
+        for stale_bucket in self.stale_buckets:
+            stale_bucket.start_grad_sync()
+
+    def finish_stale_grad_sync(self):
+        """
+        Finishes grad sync (all-reduce or reduce-scatter) communication operations
+        for all buckets in the grad buffer.
+
+        When overlap_grad_reduce is set to True, waits for asynchronous communication
+        calls to complete. When overlap_grad_reduce is set to False, calls synchronous
+        communication ops.
+        """
+        # if torch.distributed.get_rank() == 0:
+        #     print('GradBuffer finish stale grad sync', flush=True)
+        for stale_bucket in self.stale_buckets:
+            stale_bucket.finish_grad_sync()
 
     def register_grad_ready(self, param: torch.nn.Parameter):
         """
