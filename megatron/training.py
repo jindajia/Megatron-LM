@@ -403,7 +403,8 @@ def get_model(model_provider_func, model_type=ModelType.encoder_or_decoder, wrap
                                                     tensor_parallel_group=mpu.get_tensor_model_parallel_group(),
                                                     pipeline_parallel_group=mpu.get_pipeline_model_parallel_group(),
                                                     hadamard_transform=args.hadamard_transform,
-                                                    gradient_alltoall_pipeline=args.gradient_alltoall_pipeline)
+                                                    gradient_alltoall_pipeline=args.gradient_alltoall_pipeline,
+                                                    grad_error_feedback=args.grad_error_feedback,)
     fast_slow_grad_reduce_helper = None
     if args.fast_slow_grad_reduce:
         fast_slow_grad_reduce_helper = FastSlowGradReduceHelper()
@@ -497,6 +498,7 @@ def setup_model_and_optimizer(model_provider_func,
                                        scale_lr_cond, lr_mult)
     if hasattr(model[0], 'quantization_helper'):
         optimizer.quantize_helper = model[0].quantization_helper
+        optimizer.quantize_helper.bucket_map_to_global_idx = optimizer.bucket_map_to_global_idx
     if hasattr(model[0], 'fast_slow_grad_reduce_helper') and model[0].fast_slow_grad_reduce_helper is not None:
         model[0].fast_slow_grad_reduce_helper.set_optimizer(optimizer)
 

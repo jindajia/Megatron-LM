@@ -244,7 +244,7 @@ class Bucket:
             if self.quantization_helper and self.quantization_helper.quantized_gradients:
                 stream.wait_stream(torch.cuda.default_stream())
                 with torch.cuda.stream(stream):
-                    self.quantization_helper.quantize_reduce_gradients(self.data, local_data_view)
+                    self.quantization_helper.quantize_reduce_gradients(self.data, local_data_view, self)
                     # self.last_iter_reduced_grads = local_data_view.clone() # DEBUG_ONLY
                     event.record()
             else:

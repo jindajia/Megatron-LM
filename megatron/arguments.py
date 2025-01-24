@@ -1217,6 +1217,9 @@ def _add_quantize_args(parser):
     group.add_argument('--hadamard-transform', action='store_true',
                        default=False,
                        help='Hadamard Transformation before gradient reduction to decrease quantization error')
+    group.add_argument('--grad-error-feedback', action='store_true',
+                       default=False,
+                       help=' Error Feedback to compensate Gradeint quantization error')
     return parser
 
 def _add_validation_args(parser):

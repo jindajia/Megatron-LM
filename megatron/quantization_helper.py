@@ -6,6 +6,34 @@ from .quantization_cuda_builder import find_module, build_module
 
 _GRADIENT_COMM_DEBUG = int(os.getenv("GRADIENT_COMM_DEBUG", -1))
 
+def quantize_1bits(x, groupsize=-1):
+    bits = 2
+
+    assert len(list(x.shape)) == 1
+    assert groupsize % 2 == 0
+    x_shape = list(x.size())[0]
+    d = 2 ** (bits - 1)-1 ###
+
+    if groupsize == -1:
+        norm = torch.max(torch.abs(x))
+        group_x = x
+    else:
+        assert list(x.shape)[0] % groupsize == 0
+        group_x = x.view(
+            -1,
+            groupsize,
+        )
+        norm, _ = torch.max(group_x.abs(), -1, keepdim=True)
+        norm[norm==0] = 2 ** (bits - 1) - 1 ###
+
+    scale = norm.float() / d
+    x_quant = torch.sign(group_x)
+    x_quant = x_quant.to(torch.int8)
+    x_quant[x_quant==0] = 1
+    x_quant = x_quant.view(-1, groupsize)
+
+    return x_quant, scale
+
 def quantize_nbits(x, n, groupsize=-1):
     bits = n
 
@@ -121,6 +149,7 @@ class QuantizationHelper:
                  pipeline_parallel_group: torch.distributed.ProcessGroup = None,
                  hadamard_transform=False,
                  gradient_alltoall_pipeline=1,
+                 grad_error_feedback=False,
                  ):
 
         self.quantized_weights = quantized_weights
@@ -140,6 +169,10 @@ class QuantizationHelper:
         self.hadamard_matrix = None
         self.gradient_alltoall_pipeline=gradient_alltoall_pipeline
         self.grad_pipeline_streams = [torch.cuda.Stream() for _ in range(gradient_alltoall_pipeline)]
+        self.grad_error_feedback = grad_error_feedback
+        self.grad_intra_quant_error = {}
+        self.grad_inter_quant_error = {}
+        self.bucket_map_to_global_idx = None
         self.quantize_weigth_stream = torch.cuda.Stream()
         if self.quantized_gradients or self.quantized_weights:
             self.set_local_all_to_all_group()
@@ -245,8 +278,9 @@ class QuantizationHelper:
 
         return received_buffer
 
-    def quantize_reduce_gradients(self, tensor, received_buffer=None):
+    def quantize_reduce_gradients(self, tensor, received_buffer=None, bucket=None):
         world_size = torch.distributed.get_world_size(group=self.data_parallel_group)
+        (gbuf_index, dtype, bucket_index) = self.bucket_map_to_global_idx[bucket]
         # when grad type float16, should use fp32 to do transformation and quantization
         if _GRADIENT_COMM_DEBUG == 1:
             reduced_shape = list(tensor.shape)
@@ -262,7 +296,7 @@ class QuantizationHelper:
         if original_grad_type is not torch.float32:
             tensor = tensor.to(torch.float32)
 
-        self.quantized_reduce_scatter(tensor, received_buffer)
+        self.quantized_reduce_scatter(tensor, received_buffer, gbuf_index, dtype, bucket_index)
 
         if _GRADIENT_COMM_DEBUG == 1:
             diff = received_buffer - reduced_tensor
@@ -319,7 +353,7 @@ class QuantizationHelper:
 
         return original_tensor.view(-1)
 
-    def torch_quantized_reduce_scatter_intra_and_inter(self, tensor, received_buffer):
+    def torch_quantized_reduce_scatter_intra_and_inter(self, tensor, received_buffer, gbuf_index, dtype, bucket_index):
         groups = self.all2all_process_group
         pipeline = self.gradient_alltoall_pipeline
         global_world_size = torch.distributed.get_world_size(group=self.data_parallel_group)
@@ -340,9 +374,22 @@ class QuantizationHelper:
             tensor = self.hadamard_tranformation_grad(tensor)
         tensor = swizzle_tensor(tensor, self.intra_dp_size, self.inter_dp_size)
         
-        quant_tensor, quant_scale = quantize_nbits(tensor, self.gradient_quantization_bits_intra, self.gq_group_size_intra)
+        if (gbuf_index, dtype, bucket_index) in self.grad_intra_quant_error:
+            if self.hadamard_transform:
+                tensor.add_(self.hadamard_tranformation_grad(self.grad_intra_quant_error[(gbuf_index, dtype, bucket_index)]))
+            else:
+                tensor.add_(self.grad_intra_quant_error[(gbuf_index, dtype, bucket_index)])
+
+        if self.gradient_quantization_bits_intra == 1:
+            quant_tensor, quant_scale = quantize_1bits(tensor, self.gq_group_size_intra)
+        else:
+            quant_tensor, quant_scale = quantize_nbits(tensor, self.gradient_quantization_bits_intra, self.gq_group_size_intra)
         dquant_tensor = dequantize_nbits(quant_tensor, quant_scale, self.gq_group_size_intra)
-        
+        if self.grad_error_feedback:
+            if self.hadamard_transform:
+                self.grad_intra_quant_error[(gbuf_index, dtype, bucket_index)] = self.hadamard_back_tranformation(tensor) - self.hadamard_back_tranformation(dquant_tensor)
+            else:
+                self.grad_intra_quant_error[(gbuf_index, dtype, bucket_index)] = tensor - dquant_tensor
         intra_reduced_shape = list(dquant_tensor.shape)
         intra_reduced_shape[0] = intra_reduced_shape[0] // torch.distributed.get_world_size(group=groups[f'local_{pp_rank}_{tp_rank}_{intra_idx}'])
         intra_reduced_tensor = torch.zeros(intra_reduced_shape, dtype=tensor.dtype, device=torch.cuda.current_device())
@@ -353,8 +400,21 @@ class QuantizationHelper:
             async_op=False,
         )
 
-        quant_intra_reduced_tensor, quant_intra_reduced_scale = quantize_nbits(intra_reduced_tensor, self.gradient_quantization_bits_inter, self.qg_group_size_inter)
-        dquant_intra_reduced_tensor = dequantize_nbits(quant_intra_reduced_tensor, quant_intra_reduced_scale, self.qg_group_size_inter)
+        if (gbuf_index, dtype, bucket_index) in self.grad_inter_quant_error:
+            if self.hadamard_transform:
+                intra_reduced_tensor.add_(self.hadamard_tranformation_grad(self.grad_inter_quant_error[(gbuf_index, dtype, bucket_index)]))
+            else:
+                intra_reduced_tensor.add_(self.grad_inter_quant_error[(gbuf_index, dtype, bucket_index)])
+        if self.gradient_quantization_bits_inter == 1:
+            quant_intra_reduced_tensor, quant_intra_reduced_scale = quantize_1bits(intra_reduced_tensor, self.gq_group_size_inter)
+        else:
+            quant_intra_reduced_tensor, quant_intra_reduced_scale = quantize_nbits(intra_reduced_tensor, self.gradient_quantization_bits_inter, self.gq_group_size_inter)
+        dquant_intra_reduced_tensor = dequantize_nbits(quant_intra_reduced_tensor, quant_intra_reduced_scale, self.gq_group_size_inter)
+        if self.grad_error_feedback:
+            if self.hadamard_transform:
+                self.grad_inter_quant_error[(gbuf_index, dtype, bucket_index)] = self.hadamard_back_tranformation(intra_reduced_tensor) - self.hadamard_back_tranformation(dquant_intra_reduced_tensor)
+            else:
+                self.grad_inter_quant_error[(gbuf_index, dtype, bucket_index)] = intra_reduced_tensor - dquant_intra_reduced_tensor
 
         inter_reduced_shape = list(dquant_intra_reduced_tensor.shape)
         inter_reduced_shape[0] = inter_reduced_shape[0] // torch.distributed.get_world_size(group=groups[f'global_{pp_rank}_{tp_rank}_{inter_idx}'])
@@ -456,7 +516,7 @@ class QuantizationHelper:
             torch.cuda.current_stream().wait_stream(stream)
         return received_buffer
 
-    def torch_quantized_reduce_scatter_intra_only(self, tensor, received_buffer):
+    def torch_quantized_reduce_scatter_intra_only(self, tensor, received_buffer, gbuf_index, dtype, bucket_index):
         groups = self.all2all_process_group
         pipeline = self.gradient_alltoall_pipeline
         global_world_size = torch.distributed.get_world_size(group=self.data_parallel_group)
@@ -475,10 +535,26 @@ class QuantizationHelper:
 
         if self.hadamard_transform:
             tensor = self.hadamard_tranformation_grad(tensor)
-
-        quant_tensor, quant_scale = quantize_nbits(tensor, self.gradient_quantization_bits_intra, self.gq_group_size_intra)
+        if (gbuf_index, dtype, bucket_index) in self.grad_intra_quant_error:
+            if self.hadamard_transform:
+                tensor.add_(self.hadamard_tranformation_grad(self.grad_intra_quant_error[(gbuf_index, dtype, bucket_index)]))
+            else:
+                tensor.add_(self.grad_intra_quant_error[(gbuf_index, dtype, bucket_index)])
+            # tensor.sub_(self.grad_intra_quant_error[(gbuf_index, dtype, bucket_index)])
+        if self.gradient_quantization_bits_intra == 1:
+            quant_tensor, quant_scale = quantize_1bits(tensor, self.gq_group_size_intra)
+        else:
+            quant_tensor, quant_scale = quantize_nbits(tensor, self.gradient_quantization_bits_intra, self.gq_group_size_intra)
         dquant_tensor = dequantize_nbits(quant_tensor, quant_scale, self.gq_group_size_intra)
-        
+        if self.grad_error_feedback:
+            if self.hadamard_transform:
+                self.grad_intra_quant_error[(gbuf_index, dtype, bucket_index)] = self.hadamard_back_tranformation(tensor) - self.hadamard_back_tranformation(dquant_tensor)
+            else:
+                self.grad_intra_quant_error[(gbuf_index, dtype, bucket_index)] = tensor - dquant_tensor
+            # if (gbuf_index, dtype, bucket_index) in self.grad_intra_quant_error:
+            #     self.grad_intra_quant_error[(gbuf_index, dtype, bucket_index)] = tensor - dquant_tensor + self.grad_intra_quant_error[(gbuf_index, dtype, bucket_index)]
+            # else:
+                # self.grad_intra_quant_error[(gbuf_index, dtype, bucket_index)] = tensor - dquant_tensor
         intra_reduced_shape = list(dquant_tensor.shape)
         intra_reduced_shape[0] = intra_reduced_shape[0] // torch.distributed.get_world_size(group=groups[f'local_{pp_rank}_{tp_rank}_{intra_idx}'])
         intra_reduced_tensor = torch.zeros(intra_reduced_shape, dtype=tensor.dtype, device=torch.cuda.current_device())
@@ -542,7 +618,7 @@ class QuantizationHelper:
                         intra_dp_size)
         return received_buffer
 
-    def torch_quantized_reduce_scatter_inter_only(self, tensor, received_buffer):
+    def torch_quantized_reduce_scatter_inter_only(self, tensor, received_buffer, gbuf_index, dtype, bucket_index):
         groups = self.all2all_process_group
         pipeline = self.gradient_alltoall_pipeline
         global_world_size = torch.distributed.get_world_size(group=self.data_parallel_group)
@@ -562,16 +638,30 @@ class QuantizationHelper:
         if self.hadamard_transform:
             tensor = self.hadamard_tranformation_grad(tensor)
 
-        quant_tensor, quant_scale = quantize_nbits(tensor, self.gradient_quantization_bits_inter, self.gq_group_size_inter)
+        if (gbuf_index, dtype, bucket_index) in self.grad_inter_quant_error:
+            if self.hadamard_transform:
+                tensor.add_(self.hadamard_tranformation_grad(self.grad_inter_quant_error[(gbuf_index, dtype, bucket_index)]))
+            else:
+                tensor.add_(self.grad_inter_quant_error[(gbuf_index, dtype, bucket_index)])
+
+        if self.gradient_quantization_bits_inter == 1:
+            quant_tensor, quant_scale = quantize_1bits(tensor, self.gq_group_size_inter)
+        else:
+            quant_tensor, quant_scale = quantize_nbits(tensor, self.gradient_quantization_bits_inter, self.gq_group_size_inter)
         dquant_tensor = dequantize_nbits(quant_tensor, quant_scale, self.gq_group_size_inter)
-        
+        if self.grad_error_feedback:
+            if self.hadamard_transform:
+                self.grad_inter_quant_error[(gbuf_index, dtype, bucket_index)] = self.hadamard_back_tranformation(tensor) - self.hadamard_back_tranformation(dquant_tensor)
+            else:
+                self.grad_inter_quant_error[(gbuf_index, dtype, bucket_index)] = tensor - dquant_tensor
+
         inter_reduced_shape = list(dquant_tensor.shape)
-        inter_reduced_shape[0] = inter_reduced_shape[0] // torch.distributed.get_world_size(group=groups[f'local_{pp_rank}_{tp_rank}_{intra_idx}'])
+        inter_reduced_shape[0] = inter_reduced_shape[0] // torch.distributed.get_world_size(group=groups[f'global_{pp_rank}_{tp_rank}_{inter_idx}'])
         inter_reduced_tensor = torch.zeros(inter_reduced_shape, dtype=tensor.dtype, device=torch.cuda.current_device())
         torch.distributed._reduce_scatter_base(
             inter_reduced_tensor,
             dquant_tensor,
-            group=groups[f'local_{pp_rank}_{tp_rank}_{inter_idx}'],
+            group=groups[f'global_{pp_rank}_{tp_rank}_{inter_idx}'],
             async_op=False,
         )
 
@@ -628,15 +718,15 @@ class QuantizationHelper:
                         inter_dp_size)
         return received_buffer
         
-    def quantized_reduce_scatter(self, tensor, received_buffer):
+    def quantized_reduce_scatter(self, tensor, received_buffer, gbuf_index, dtype, bucket_index):
         if self.intra_dp_size > 1 and self.inter_dp_size > 1:
             # return self.quantized_reduce_scatter_intra_and_inter(tensor, received_buffer)
-            return self.torch_quantized_reduce_scatter_intra_and_inter(tensor, received_buffer)
+            return self.torch_quantized_reduce_scatter_intra_and_inter(tensor, received_buffer, gbuf_index, dtype, bucket_index)
         elif self.intra_dp_size > 1:
             # return self.quantized_reduce_scatter_intra_only(tensor, received_buffer)
-            return self.torch_quantized_reduce_scatter_intra_only(tensor, received_buffer)
+            return self.torch_quantized_reduce_scatter_intra_only(tensor, received_buffer, gbuf_index, dtype, bucket_index)
         elif self.inter_dp_size > 1:
-            return self.quantized_reduce_scatter_inter_only(tensor, received_buffer)
+            return self.torch_quantized_reduce_scatter_inter_only(tensor, received_buffer, gbuf_index, dtype, bucket_index)
         else:
             received_buffer.copy_(tensor)
             return received_buffer
