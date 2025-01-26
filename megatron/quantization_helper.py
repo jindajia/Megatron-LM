@@ -679,7 +679,7 @@ class QuantizationHelper:
 
         groups = self.all2all_process_group
         global_world_size = torch.distributed.get_world_size(group=self.data_parallel_group)
-        inter_quant_group = max(math.ceil(tensor.numel() / self.gq_group_size_intra), global_world_size)
+        inter_quant_group = max(math.ceil(tensor.numel() / self.gq_group_size_inter), global_world_size)
         intra_dp_size = self.intra_dp_size
         inter_dp_size = self.inter_dp_size
 
