@@ -20,7 +20,9 @@ using Params = quantize::Params<qType, numBits>;
 
 constexpr int granularity = quantize::granularity;
 using PackedInt4 = quantize::PackedInt4;
+using PackedInt1 = quantize::PackedInt1;
 
+constexpr int f_per_chunk = granularity / sizeof(float);
 constexpr int h_per_chunk = granularity / sizeof(__half);
 constexpr int h2_per_chunk = granularity / sizeof(__half2);
 
@@ -68,16 +70,37 @@ template <typename T, int numBits, Type qType>
 DS_D_INLINE void chunk(T* local_output, const int8_t* data, Params<qType, numBits> q_params)
 {
     constexpr int32_t num_elems_packed = 8 / numBits;
-    constexpr int32_t iters = h_per_chunk / num_elems_packed;
-
+    constexpr int32_t iters = numBits==1? 1 : f_per_chunk / num_elems_packed;
+    cg::thread_block tb = cg::this_thread_block();
+    const bool is_high_val = tb.thread_index().x % 2;
 #pragma unroll
     for (int i = 0; i < iters; i++) {
         if constexpr (num_elems_packed == 1) {
             local_output[i] = q_params.template dequantize<T>(data[i]);
-        } else {
+        } else if constexpr (num_elems_packed == 2) {
             auto accessible_data = *(PackedInt4*)(&data[i]);
             local_output[2 * i] = q_params.template dequantize<T>(accessible_data.low);
             local_output[2 * i + 1] = q_params.template dequantize<T>(accessible_data.high);
+        } 
+        else if constexpr (num_elems_packed == 8) {
+            int8_t accessible_data = static_cast<int>(data[i]);
+
+            if (is_high_val) { // Odd threads: Handle high 4 bits
+
+                // Dequantize each of the 4 bits into separate floats
+                local_output[4 * i]     = q_params.template dequantize<T>(static_cast<int>(accessible_data>>7 & 0x01));
+                local_output[4 * i + 1] = q_params.template dequantize<T>(static_cast<int>(accessible_data>>6 & 0x01));
+                local_output[4 * i + 2] = q_params.template dequantize<T>(static_cast<int>(accessible_data>>5 & 0x01));
+                local_output[4 * i + 3] = q_params.template dequantize<T>(static_cast<int>(accessible_data>>4 & 0x01));
+            }
+            else { // Even threads: Handle low 4 bits without bit operations
+                local_output[4 * i]     = q_params.template dequantize<T>(static_cast<int>(accessible_data>>3 & 0x01));
+                local_output[4 * i + 1] = q_params.template dequantize<T>(static_cast<int>(accessible_data>>2 & 0x01));
+                local_output[4 * i + 2] = q_params.template dequantize<T>(static_cast<int>(accessible_data>>1 & 0x01));
+                local_output[4 * i + 3] = q_params.template dequantize<T>(static_cast<int>(accessible_data>>0 & 0x01));
+            }
+        } else {
+
         }
     }
 }

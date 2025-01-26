@@ -33,15 +33,16 @@ __global__ void __launch_bounds__(1024) dequant_reduce(float* reduced_data,
     // NOTE(cmikeh2): This probably could be hardcoded to a larger number,
     // but that means even stronger restrictions on the number of elements per group
     // A performance analysis here might be beneficial
-    constexpr int mem_granularity = (numBits == 8) ? 4 : 2; // mem_granularity = 16 / sizeof(float) / (8 / numBits)
-    constexpr int elems_per_load = mem_granularity / sizeof(int8_t);  // div by 1
+    constexpr int mem_granularity = (numBits == 1? 1 : numBits / 2); // mem_granularity = 16 / sizeof(float) / (8 / numBits)
+    constexpr int elems_per_load = numBits==1? 1 : mem_granularity / sizeof(int8_t);  // div by 1
     constexpr int storage_values = 16 / sizeof(float); //for each thread, each chunk operate on 16bytes, 4 float32 elements. 
                                                         //If you want to change 16, you should also change totalChunks
 
     const int64_t block_offset = tb.group_index().x * elems_per_in_group;
-    const int elem_offset = tb.thread_index().x * elems_per_load;
+    const int elem_offset = tb.thread_index().x * numBits / 2;
     const int64_t base_offset = block_offset + elem_offset;
-    const int stride = tb.group_dim().x * elems_per_load;
+    const int stride = tb.group_dim().x * (numBits / 2);
+    const int64_t output_base_offset = block_offset * 8 / numBits + tb.thread_index().x * 4;
 
     float local_buffer[totalChunks * storage_values];
 
@@ -68,12 +69,17 @@ __global__ void __launch_bounds__(1024) dequant_reduce(float* reduced_data,
 
                     mem_access::load_global<mem_granularity>(
                         load_buffer, input_data + j * elems_per_in_tensor + iter_offset);
+                    
+                    // printf("JINDA_DEBUG: group_index().x: %d\n", tb.group_index().x);
+                    // printf("JINDA_DEBUG: thread_index().x: %d\n", tb.thread_index().x);
+                    // printf("JINDA_DEBUG: group_index().x: %d, thread_index().x: %d, load_buffer[0]: %d\n", tb.group_index().x, tb.thread_index().x, load_buffer[0]);
 
                     quantize::Params<quantType, numBits> params(
                         input_scales + j * groups_per_in_tensor, iter_scale_idx);
 
                     float dequant_buffer[storage_values];
                     dequantize::chunk<numBits, quantType>(dequant_buffer, load_buffer, params);
+                    // printf("JINDA_DEBUG: group_index().x: %d, thread_index().x: %d, dequant_buffer[0], dequant_buffer[1]: %d\n", tb.group_index().x, tb.thread_index().x, dequant_buffer[0], dequant_buffer[1]);
 
 #pragma unroll
                     for (int k = 0; k < storage_values; k++) {
@@ -107,10 +113,26 @@ __global__ void __launch_bounds__(1024) dequant_reduce(float* reduced_data,
         }
 
     }
+    // if (tb.thread_index().x == 1){
+    //     printf("t1: totalChunks: %d\n", totalChunks);
+    //     printf("t1: local_buffer[0]: %f\n", local_buffer[0]);
+    //     printf("t1: local_buffer[1]: %f\n", local_buffer[1]);
+    //     printf("t1: local_buffer[2]: %f\n", local_buffer[2]);
+    //     printf("t1: local_buffer[3]: %f\n", local_buffer[3]);
+    //     printf("t1: stride: %d\n", stride);
+    //     printf("t1: base_offset: %d\n", base_offset);
+    //     printf("t1: elem_offset: %d\n", elem_offset);
+    //     printf("t1: block_offset: %d\n", block_offset);
+    //     printf("t1: elems_per_in_group: %d\n", elems_per_in_group);
+    //     printf("t1: tb.group_dim().x: %d\n", tb.group_dim().x);
+    //     printf("t1: output_base_offset: %d\n", output_base_offset);
 
+    // }
 #pragma unroll
     for (int i = 0; i < totalChunks; i++) {
-        const int64_t iter_offset = (i * stride + base_offset) * (8 / numBits);
+        // const int64_t iter_offset = (i * stride + base_offset) * (8 / numBits);
+        const int64_t iter_offset = i * stride * 8 / numBits + output_base_offset;
+
         if (i * stride + elem_offset < elems_per_in_group) {
             mem_access::store_global<16>(reduced_data + iter_offset, local_buffer + i * storage_values); //for each thread, each chunk operate on 16bytes, 4 float32 elements. 
                                                                                                         //If you want to change 16, you should also change totalChunks
@@ -148,23 +170,25 @@ void launch_dequant_reduce_impl(float* reduced_data,
                                 cudaStream_t stream)
 {
     // This is a coincidence. This is derived by 8 halves per 16 bytes with 2-way packing for int4
-    // Note, this should be changed for float
-    constexpr int elems_per_thread = numBits / 2; // elems_per_thread = 16 / sizeof(float) / (8 / numBits)
+    // Note, this should be changed for float'
+    // elems_per_thread = 16 / sizeof(float) / (8 / numBits), actually 1 bits elems_per_thread is 0.5, but we can't use 0.5, so we use 1
+    // constexpr int elems_per_thread = numBits == 1? 1 :  numBits / 2; 
+    const int vals_per_in_group = elems_per_in_group * (8 / numBits);
     const int one_step_threads =
-        next_pow2((elems_per_in_group + elems_per_thread - 1) / (elems_per_thread));
+        next_pow2((vals_per_in_group * 2 + numBits - 1) / (numBits));
     // TODO(cmikeh2): Tune this
     const int threads = (one_step_threads < 1024) ? one_step_threads : 1024;
 
     dim3 block(threads);
     dim3 grid(out_groups);
 
-    const int elems_per_step = threads * elems_per_thread;
+    const int elems_per_step = threads * numBits / 2;
     const int unroll_raw = (elems_per_in_group + elems_per_step - 1) / elems_per_step;
 
     const int unroll = (unroll_raw >= 4) ? pow2_round<1>(unroll_raw) : unroll_raw;
 
     if (unroll == 1) {
-        // 0-4096 elems
+        // 0-4096 elems... 8 bits
         LAUNCH_DEQUANT_REDUCE(1);
     } else if (unroll == 2) {
         // 4097-8192 etc...
@@ -240,6 +264,20 @@ void launch_dequant_reduce(float* reduced_data,
                 LAUNCH_DEQUANT_REDUCE_IMPL(8, 16, quantize::Type::Symmetric);
             } else {
                 LAUNCH_DEQUANT_REDUCE_IMPL(8, -1, quantize::Type::Symmetric);
+            }
+        } else if (num_bits == 1) {
+            if (num_gpus == 1) {
+                LAUNCH_DEQUANT_REDUCE_IMPL(1, 1, quantize::Type::Symmetric);
+            } else if (num_gpus == 2) {
+                LAUNCH_DEQUANT_REDUCE_IMPL(1, 2, quantize::Type::Symmetric);
+            } else if (num_gpus == 4) {
+                LAUNCH_DEQUANT_REDUCE_IMPL(1, 4, quantize::Type::Symmetric);
+            } else if (num_gpus == 8) {
+                LAUNCH_DEQUANT_REDUCE_IMPL(1, 8, quantize::Type::Symmetric);
+            } else if (num_gpus == 16) {
+                LAUNCH_DEQUANT_REDUCE_IMPL(1, 16, quantize::Type::Symmetric);
+            } else {
+                LAUNCH_DEQUANT_REDUCE_IMPL(1, -1, quantize::Type::Symmetric);
             }
         }
     } else if (quant_type == quantize::Type::Asymmetric) {

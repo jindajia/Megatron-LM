@@ -118,6 +118,9 @@ public:
     template <typename T>
     DS_D_INLINE T dequantize(int8_t val)
     {
+        if constexpr (numBits == 1) {
+            val = ((val & 0x01)== 1 ? 1 : -1);
+        }
         const float val_deq_f = conversion::to<float>(val) * scale;
         return conversion::to<T>(val_deq_f);
     }

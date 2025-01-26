@@ -467,6 +467,14 @@ __device__ __forceinline__ void load_global<4, LoadPolicy::CacheStreaming>(void*
 }
 
 template <>
+__device__ __forceinline__ void load_global<1>(void* dst, const void* src)
+{
+    int8_t* data = reinterpret_cast<int8_t*>(dst);
+    const int8_t* src_cast = reinterpret_cast<const int8_t*>(src);
+    data[0] = src_cast[0];
+}
+
+template <>
 __device__ __forceinline__ void load_global<2>(void* dst, const void* src)
 {
     int16_t* data = reinterpret_cast<int16_t*>(dst);
