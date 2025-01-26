@@ -258,8 +258,9 @@ std::vector<at::Tensor> stochastic_quantize(at::Tensor& input_vals,
                               .requires_grad(false);
 
     auto output_sizes = input_vals.sizes().vec();
-    output_sizes[output_sizes.size() - 1] /= numBits == 8 ? 1 : 2;
-    auto output = torch::empty(output_sizes, output_options);
+    output_sizes[output_sizes.size() - 1] /= (8 / numBits);
+    // printf("JINDA_DEBUG output_sizes: %d, numBits: %d \n", output_sizes[output_sizes.size() - 1], numBits);
+    auto output = torch::zeros(output_sizes, output_options);
 
     const int elems_per_group = at::numel(input_vals) / groups;
 

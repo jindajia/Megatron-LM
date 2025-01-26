@@ -174,13 +174,19 @@ __global__ void cached_quantization(int8_t* __restrict__ output_data,
         } else {                                                                    \
             LAUNCH_CACHED_QUANT_CALL(4, quantize::Type::Symmetric)                  \
         }                                                                           \
-    } else {                                                                        \
+    } else if (q_bits == 8) {                                                       \
         if (quant_type == quantize::Type::Asymmetric) {                             \
             LAUNCH_CACHED_QUANT_CALL(8, quantize::Type::Asymmetric)                 \
         } else {                                                                    \
             LAUNCH_CACHED_QUANT_CALL(8, quantize::Type::Symmetric)                  \
         }                                                                           \
-    }
+    } else if (q_bits == 1) {                                                       \
+        if (quant_type == quantize::Type::Asymmetric) {                             \
+            LAUNCH_CACHED_QUANT_CALL(1, quantize::Type::Asymmetric)                 \
+        } else {                                                                    \
+            LAUNCH_CACHED_QUANT_CALL(1, quantize::Type::Symmetric)                  \
+        }                                                                           \
+    }                                                                               \
 
 void launch_quant(int8_t* output_data,
                   float* params,

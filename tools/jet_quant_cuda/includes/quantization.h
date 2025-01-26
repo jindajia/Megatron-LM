@@ -20,6 +20,13 @@ struct PackedInt4 {
     int8_t low : 4;
 };
 
+struct PackedInt1 {
+    int8_t val_4 : 1;
+    int8_t val_3 : 1;
+    int8_t val_2 : 1;
+    int8_t val_1 : 1;
+};
+
 DS_HD_INLINE bool requires_offset(Type qType) { return qType == Type::Asymmetric; }
 
 }  // namespace quantize

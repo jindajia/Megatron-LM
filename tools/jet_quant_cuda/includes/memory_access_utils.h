@@ -908,6 +908,32 @@ __device__ __forceinline__ void store_global<2, StorePolicy::CacheStreaming>(voi
     *dst_cast = *data;
 #endif
 }
+
+// Specialization for AccessSize=1
+template <>
+__device__ __forceinline__ void store_global<1>(void* dst, const void* src)
+{
+    const uint8_t* data = reinterpret_cast<const uint8_t*>(src);
+    uint8_t* dst_cast = reinterpret_cast<uint8_t*>(dst);
+    *dst_cast = *data;
+}
+template <>
+__device__ __forceinline__ void store_global<1, StorePolicy::CacheGlobal>(void* dst,
+                                                                          const void* src)
+{
+    const uint8_t* data = reinterpret_cast<const uint8_t*>(src);
+    uint8_t* dst_cast = reinterpret_cast<uint8_t*>(dst);
+    *dst_cast = *data;
+}
+
+template <>
+__device__ __forceinline__ void store_global<1, StorePolicy::CacheStreaming>(void* dst,
+                                                                             const void* src)
+{
+    const uint8_t* data = reinterpret_cast<const uint8_t*>(src);
+    uint8_t* dst_cast = reinterpret_cast<uint8_t*>(dst);
+    *dst_cast = *data;
+}
 /////////// Store Shared ///////////
 
 template <>

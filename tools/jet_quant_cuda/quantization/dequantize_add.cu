@@ -235,6 +235,8 @@ __global__ void dequantize_kernel(
     } else if constexpr (numBits == 3) {
         // TODO(cmikeh2): Need this implementation
         assert(false);
+    } else if constexpr (numBits == 1) {
+        // Currently do nothing.
     } else {
         assert(false);
     }

@@ -67,13 +67,21 @@ public:
         if (max == 0) {
             scale = 1.0;
         } else {
+            if constexpr (numBits == 1) {
+                scale = 1.0 / max;
+            } else {
             scale = ((1 << (numBits-1)) - 1) / max; // Attention: we tried to use all 16 lattice, but the convergence at last phase is worse.
+            }
         }
     }
 
     template <typename T>
     DS_D_INLINE int8_t quantize(T val)
     {
+        if constexpr (numBits == 1) {
+            int8_t val_i8 = val > 0;
+            return val_i8;
+        }
         constexpr int32_t q_min = -(1 << (numBits - 1));
         constexpr int32_t q_max = (1 << (numBits - 1)) - 1;
 
@@ -687,6 +695,13 @@ DS_D_INLINE void _chunk(int8_t* local_output, const float* data, Params<qType, n
             int8_t data_i8_2 = q_params.stochastic_quantize(data[i + 1]);
             auto data_i8 = PackedInt4{data_i8_2, data_i8_1};
             local_output[oi] = *((int8_t*)(&data_i8));
+        } else if (num_elems_packed == 8) {
+            int8_t data_i8_1 = q_params.quantize(data[i]);
+            int8_t data_i8_2 = q_params.quantize(data[i + 1]);
+            int8_t data_i8_3 = q_params.quantize(data[i + 2]);
+            int8_t data_i8_4 = q_params.quantize(data[i + 3]);
+            auto data_i8 = PackedInt1{data_i8_4, data_i8_3, data_i8_2, data_i8_1};
+            local_output[oi] = *((int8_t*)(&data_i8));
         }
     }
 }
@@ -829,7 +844,7 @@ DS_D_INLINE void local_array(cg::thread_block& tb,
                              Params<qType, numBits> q_params)
 {
     constexpr int num_ele_int8 = 8 / numBits;
-    constexpr int num_int8_out = quantize::f_per_load / num_ele_int8;
+    constexpr int num_int8_out = (numBits == 1) ? 1 : (quantize::f_per_load / num_ele_int8);
 
     // Indexing offsets
     const int64_t block_num =
@@ -846,15 +861,50 @@ DS_D_INLINE void local_array(cg::thread_block& tb,
             global_params,
             block_num);
     }
+    // Special handling for numBits=1
+    if constexpr (numBits == 1) {
+
 #pragma unroll
-    for (int i = 0; i < numChunks; i++) {
-        if (elem_offset + i * stride * num_ele_int8 < elems_per_group && block_num < groups) {
-            quantize::_chunk<numBits, qType>(
-                local_output, local_buffer + i * quantize::f_per_load, q_params);
-            mem_access::store_global<num_int8_out>(output_data + (base_offset + i * stride),
-                                                   local_output);
+        for (int i = 0; i < numChunks; i++) {
+            if (elem_offset + i * stride * num_ele_int8 < elems_per_group && block_num < groups) {
+                quantize::_chunk<numBits, qType>(
+                    local_output, local_buffer + i * quantize::f_per_load, q_params);
+
+                unsigned int lane_id = warp.thread_rank(); // 0 to warp_size-1
+                bool is_even = (lane_id % 2) == 0;
+
+                int8_t packed_byte = 0;
+                // Even thread: fetch the odd thread's output
+                int8_t paired_output = warp.shfl_down(local_output[0], 1);
+                
+                if (is_even) {
+
+                    // Pack the two 4-bit outputs into one byte
+                    packed_byte = (local_output[0]) | (paired_output << 4);
+
+                    // Calculate the global memory offset
+                    int64_t global_offset = base_offset + i * stride;
+                    // // Store the packed byte
+                    mem_access::store_global<num_int8_out>(
+                        output_data + global_offset, &packed_byte);
+                }
+
+
+            }
         }
     }
+    else {
+#pragma unroll
+        for (int i = 0; i < numChunks; i++) {
+            if (elem_offset + i * stride * num_ele_int8 < elems_per_group && block_num < groups) {
+                quantize::_chunk<numBits, qType>(
+                    local_output, local_buffer + i * quantize::f_per_load, q_params);
+                mem_access::store_global<num_int8_out>(output_data + (base_offset + i * stride),
+                                                    local_output);
+            }
+        }
+    }
+
 }
 
 template <Type qType, int numBits, int numChunks, int threads_per_group, int max_threads>
