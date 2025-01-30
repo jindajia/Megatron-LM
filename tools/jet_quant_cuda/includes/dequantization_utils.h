@@ -70,7 +70,7 @@ template <typename T, int numBits, Type qType>
 DS_D_INLINE void chunk(T* local_output, const int8_t* data, Params<qType, numBits> q_params)
 {
     constexpr int32_t num_elems_packed = 8 / numBits;
-    constexpr int32_t iters = numBits==1? 1 : f_per_chunk / num_elems_packed;
+    constexpr int32_t iters = numBits==1? 1 : h_per_chunk / num_elems_packed;
     cg::thread_block tb = cg::this_thread_block();
     const bool is_high_val = tb.thread_index().x % 2;
 #pragma unroll
