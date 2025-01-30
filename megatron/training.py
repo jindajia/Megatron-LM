@@ -498,7 +498,8 @@ def setup_model_and_optimizer(model_provider_func,
                                        scale_lr_cond, lr_mult)
     if hasattr(model[0], 'quantization_helper'):
         optimizer.quantize_helper = model[0].quantization_helper
-        optimizer.quantize_helper.bucket_map_to_global_idx = optimizer.bucket_map_to_global_idx
+        if hasattr(optimizer, 'bucket_map_to_global_idx') and optimizer.quantize_helper is not None:
+            optimizer.quantize_helper.bucket_map_to_global_idx = optimizer.bucket_map_to_global_idx
     if hasattr(model[0], 'fast_slow_grad_reduce_helper') and model[0].fast_slow_grad_reduce_helper is not None:
         model[0].fast_slow_grad_reduce_helper.set_optimizer(optimizer)
 
