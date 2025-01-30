@@ -382,6 +382,7 @@ class QuantizationHelper:
         return received_buffer
 
     def quantized_reduce_scatter_inter_only(self, tensor, received_buffer, stale_handle_event=None):
+
         assert tensor.numel() % self.gq_group_size_inter == 0 # tensor size must be multiple of group size
         assert self.gq_group_size_inter  % (8 // min(self.gradient_quantization_bits_inter, self.gradient_quantization_bits_intra)) == 0 # group size must be multiple of 2 when using 4bits
         assert self.gq_group_size_inter % 8 == 0 # group size must be multiple of 8 when tensor is half type; must be multiple of 4 when type is float. 
@@ -411,12 +412,14 @@ class QuantizationHelper:
         
         """inter node quantization and all-to-all"""
         quant_tensor, quant_scales = st_quant(tensor, inter_quant_group, self.gradient_quantization_bits_inter, quant_module.Symmetric)
-
+        # print(f"JINDA_DEBUG: quant_tensor size: {quant_tensor.size()}, dtype: {quant_tensor.dtype}")
         """all to all"""
         all_to_all_output_tensor = torch.empty_like(quant_tensor)
         all_to_all_output_scales = torch.empty_like(quant_scales)
         all_to_all_single(all_to_all_output_tensor, quant_tensor, group=groups[f'global_{pp_rank}_{tp_rank}_{inter_idx}'])
         all_to_all_single(all_to_all_output_scales, quant_scales, group=groups[f'global_{pp_rank}_{tp_rank}_{inter_idx}'])
+
+        # print(f"JINDA_DEBUG: all_to_all_output_tensor size: {all_to_all_output_tensor.size()}, dtype: {all_to_all_output_tensor.dtype}")
 
         """dequantizeReduction"""
         final_dequant(all_to_all_output_tensor, 
