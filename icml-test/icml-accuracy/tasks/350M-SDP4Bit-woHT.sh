@@ -22,8 +22,8 @@ export SCRIPT_DIR=.../icml-accuracy
 export OUTPUT_BASE_DIR=/.../
 # ----------------- Numerber of GPUs  -----------------
 
-NUM_NODES_LIST=(4 ) 
-export RUNNING_GPUS_PER_NODE=8
+NUM_NODES_LIST=(2 ) 
+export RUNNING_GPUS_PER_NODE=4
 
 
 # ----------------- Strat srun script -----------------
@@ -36,14 +36,13 @@ nvidia-smi
 
 # ----------------- Model and Training Config -----------------
 MODEL_LIST=(
-    "125M" 
+    "350M" 
 )
 
 TRAIN_CONFIG_LIST=(
     "SDP4Bit" 
 ) 
 
-export ACCUMULATION_STEP=32
 
 # ----------------- Model and Training Config -----------------
 

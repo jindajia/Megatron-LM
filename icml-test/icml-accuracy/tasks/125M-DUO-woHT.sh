@@ -23,8 +23,8 @@ export OUTPUT_BASE_DIR=/N/slate/jindjia/bash_scripts/bytedance2/icml-accuracy-by
 
 # ----------------- Numerber of GPUs  -----------------
 
-NUM_NODES_LIST=(4 ) 
-export RUNNING_GPUS_PER_NODE=8
+NUM_NODES_LIST=(2 ) 
+export RUNNING_GPUS_PER_NODE=4
 
 
 # ----------------- Strat srun script -----------------
