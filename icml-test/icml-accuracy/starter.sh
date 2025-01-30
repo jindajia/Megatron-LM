@@ -1,0 +1,21 @@
+
+
+
+bash ${SCRIPT_DIR}/common/dist_starter.sh \
+    "$CHECKPOINT_PATH" \
+    "$TENSOR_PARALLEL_SIZE" \
+    "$PIPELINE_PARALLEL_SIZE" \
+    "$MICRO_BATCH_SIZE" \
+    "$GLOBAL_BATCH_SIZE" \
+    "$MODEL_ARG_PATH" \
+    "$TRAINING_ARG_PATH" \
+    "$OUTPUT_DIR" \
+    "$MEGATRON_PATH" \
+    "$RUNNING_NODES" \
+    "$RUNNING_GPUS_PER_NODE" \
+    "$EXIT_INTERVAL" \
+    "$LOG_INTERVAL" \
+    "$TENSORBOARD_DIR" \
+    "$WANDB_DIR" \
+    "$WANDB_PROJECT" \
+    "$WANDB_NAME"
