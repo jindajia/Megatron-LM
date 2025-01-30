@@ -86,5 +86,5 @@ torchrun $DISTRIBUTED_ARGS pretrain_gpt.py \
     $PROFILER_ARGS \
     $ADVANCED_ARGS \
     $DUO_ARGS \
-    --distributed-backend cpu:gloo,cuda:nccl \
+    --distributed-backend nccl \
     --exit-interval ${EXIT_INTERVAL}
