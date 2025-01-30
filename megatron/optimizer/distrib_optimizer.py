@@ -1350,6 +1350,7 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
         # If so, wait on the handle to ensure the communication is finished.
         assert all_gather_handle_index < len(self.all_gather_handles)
         all_gather_handle = self.all_gather_handles[all_gather_handle_index]
+        next_all_gather_handle_index = all_gather_handle_index + 1
         if all_gather_handle is not None:
             if isinstance(all_gather_handle, torch.cuda.Event):
                 all_gather_handle.wait()
@@ -1365,17 +1366,20 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
             # want to head-of-line block the compute kernels with communication kernels
             # (since we run with CUDA_DEVICE_MAX_CONNECTIONS=1 to support sequence
             # parallelism).
-            next_all_gather_handle_index = all_gather_handle_index + 1
             if next_all_gather_handle_index < self.num_all_gather_handles:
                 self._dispatch_gather_model_params(next_all_gather_handle_index)
-            if next_all_gather_handle_index == self.num_all_gather_handles:
-                for grad_buffer_idx, grad_buffer in enumerate(self.grad_buffers):
-                    grad_buffer.start_stale_grad_sync()
         # Also check if we have already copied from the param buffer for this
         # handle; if not, complete the copy and mark as such.
         if not self.param_buffer_copied[all_gather_handle_index]:
             self._copy_params_from_param_buffer(all_gather_handle_index)
             self.param_buffer_copied[all_gather_handle_index] = True
+        if all_gather_handle is not None:
+            if all_gather_handle_index == 1:
+                for grad_buffer_idx, grad_buffer in enumerate(self.grad_buffers):
+                    grad_buffer.start_last_bucket_D2H_copy()
+            elif next_all_gather_handle_index == self.num_all_gather_handles:
+                for grad_buffer_idx, grad_buffer in enumerate(self.grad_buffers):
+                    grad_buffer.start_stale_grad_sync()
 
     def _copy_params_from_param_buffer(self, all_gather_handle_index):
         """

@@ -421,6 +421,7 @@ def get_model(model_provider_func, model_type=ModelType.encoder_or_decoder, wrap
                      disable_bucketing=(model_chunk_idx > 0),
                      quantization_helper=quantize_helper,
                      fast_slow_grad_reduce_helper=fast_slow_grad_reduce_helper,
+                     bucket_size=args.bucket_size,
                      )
                  for (model_chunk_idx, model_chunk) in enumerate(model)]
 
@@ -702,7 +703,7 @@ def training_log(loss_dict, total_loss_dict, learning_rate, iteration,
     for key in loss_dict:
         if not skipped_iter:
             total_loss_dict[key] = total_loss_dict.get(
-                key, torch.tensor([0.0], dtype=torch.float, device='cuda')) + loss_dict[key]
+                key, torch.zeros(1, dtype=torch.float, device='cuda')) + loss_dict[key]
         else:
             value = loss_dict[key].float().sum().item()
             is_nan = value == float('inf') or \
@@ -776,9 +777,10 @@ def training_log(loss_dict, total_loss_dict, learning_rate, iteration,
             if wandb_writer:
                 wandb_writer.log({key: loss_dict[key]}, iteration)
         if args.log_loss_scale_to_tensorboard:
-            writer.add_scalar('loss-scale', loss_scale, iteration)
-            writer.add_scalar('loss-scale vs samples', loss_scale,
-                              args.consumed_train_samples)
+            if loss_scale is not None:
+                writer.add_scalar('loss-scale', loss_scale, iteration)
+                writer.add_scalar('loss-scale vs samples', loss_scale,
+                                args.consumed_train_samples)
             if wandb_writer:
                 wandb_writer.log({'loss-scale': loss_scale}, iteration)
         if args.log_world_size_to_tensorboard:
@@ -858,7 +860,8 @@ def training_log(loss_dict, total_loss_dict, learning_rate, iteration,
                 if avg > 0.0:
                     log_string += ' {}: {:.6E} |'.format(key, avg)
                 total_loss_dict[key] = torch.tensor([0.0], dtype=torch.float, device='cuda')
-        log_string += ' loss scale: {:.1f} |'.format(loss_scale)
+        if loss_scale is not None:
+            log_string += ' loss scale: {:.1f} |'.format(loss_scale)
         if grad_norm is not None:
             log_string += ' grad norm: {:.3f} |'.format(grad_norm)
         if num_zeros_in_grad is not None:
@@ -1046,7 +1049,8 @@ def train(forward_step_func, model, optimizer, opt_param_scheduler,
         num_floating_point_operations_so_far += num_floating_point_operations(args, batch_size)
 
         # Logging.
-        loss_scale = optimizer.get_loss_scale().item()
+        loss_scale = None
+        # loss_scale = optimizer.get_loss_scale().item()
         params_norm = None
         if args.log_params_norm:
             params_norm = calc_params_l2_norm(model)

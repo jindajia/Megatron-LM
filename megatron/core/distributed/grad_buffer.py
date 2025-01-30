@@ -334,12 +334,16 @@ class Bucket:
     def finish_stale_grad_sync(self):
         self.stale_bucket.finish_grad_sync()
 
-    def register_grad_ready(self, param: torch.nn.Parameter):
+    def register_grad_ready(self, param: torch.nn.Parameter, isfrist_bucket=False, islast_bucket=False):
         """
         Registers grads for the passed-in param to be "ready" for grad sync.
 
         When the number of microbatches is greater than 1, we only want to register
         grads as ready when processing the last microbatch and overlap_grad_reduce is True.
+
+        By profiling, we know that D2H will case some operation sync for cpu, and non efficient.
+        To make it efficient and not blocking operations at last microbatch, we will delay last bucket
+        D2H copy to the next iteration after all-gather. Please check start_stale_grad_sync.
         """
         assert param in self.params, 'Param is not in the bucket'
         assert param not in self.params_with_grad, 'Cannot set grad twice'
@@ -348,18 +352,10 @@ class Bucket:
         ), 'register_grad_ready() should be called only when overlapping grad reduce'
         self.params_with_grad.add(param)
         
-        if len(self.params_with_grad) == 1:
+        if len(self.params_with_grad) == 1 and isfrist_bucket:
+            """we dispatch all bucket H2D when the first bucket start backward"""
             if self.stale_bucket is not None and self.stale_bucket.communication_issued:
-                self.stale_bucket.finish_grad_sync()
-                self.stale_bucket.reset()
-                if self.fast_slow_grad_reduce_helper and self.fast_slow_grad_reduce_helper.last_iter_updated_successfully:
-                    self.bucket_wise_optimizer_event = torch.cuda.Event()
-                    self.HtoD_stream.wait_stream(torch.cuda.default_stream())
-                    with torch.cuda.stream(self.HtoD_stream):
-                        self.fast_slow_grad_reduce_helper.bucket_wise_copy_high_precision_grads_to_main_grads_each_bucket(self)
-                        self.fast_slow_grad_reduce_helper.bucket_wise_optimizer_step(self)
-                        self.fast_slow_grad_reduce_helper.zero_optimizer_shard_grad()
-                        self.bucket_wise_optimizer_event.record()
+                self.parent_ref.dispatch_H2D_copy()
         # If all params in bucket have grads available, issue communication call.
         if len(self.params_with_grad) == len(self.params):
 
@@ -383,15 +379,24 @@ class Bucket:
                 self.handle_for_stale_bucket_copy = event
                 # self.parent_ref.finsh_using_shared_temp_buffer()
                 # self.parent_ref.start_using_temp_buffer(event)
-                self.DtoH_stream.wait_stream(torch.cuda.default_stream())
-                with torch.cuda.stream(self.DtoH_stream):
-                    temp_cuda_buffer = self.data.clone()
+                if not islast_bucket:
+                    self.DtoH_stream.wait_stream(torch.cuda.default_stream())
+                    with torch.cuda.stream(self.DtoH_stream):
+                        temp_cuda_buffer = self.data.clone()
+                        event_temp_copy.record()
+                        temp_cuda_buffer.div_(self.data_parallel_world_size)
+                        self.stale_bucket.data.copy_(temp_cuda_buffer, non_blocking=True)
+                        temp_cuda_buffer = None
+                        event.record()
+                else:
+                    # self.DtoH_stream.wait_stream(torch.cuda.default_stream())
+                    # with torch.cuda.stream(self.DtoH_stream):
+                    self.temp_cuda_buffer = self.data.clone()
                     event_temp_copy.record()
-                    temp_cuda_buffer.div_(self.data_parallel_world_size)
-                    self.stale_bucket.data.copy_(temp_cuda_buffer, non_blocking=True)
-                    temp_cuda_buffer = None
-                    event.record()
-                
+                        # temp_cuda_buffer.div_(self.data_parallel_world_size)
+                        # self.stale_bucket.data.copy_(temp_cuda_buffer, non_blocking=True)
+                        # temp_cuda_buffer = None
+                        # event.record()
                 event_temp_copy.wait()
                 # torch.cuda.synchronize()
                 # bucket_map_to_global_idx = self.fast_slow_grad_reduce_helper.optimizer.bucket_map_to_global_idx
@@ -758,9 +763,18 @@ class GradBuffer:
         for bucket in self.buckets:
             bucket.finish_grad_sync()
 
+    def start_last_bucket_D2H_copy(self):
+        if self.fast_slow_grad_reduce_helper is not None:
+            last_bucket = self.buckets[-1]
+            last_bucket.DtoH_stream.wait_stream(torch.cuda.default_stream())
+            with torch.cuda.stream(last_bucket.DtoH_stream):
+                last_bucket.temp_cuda_buffer.div_(self.data_parallel_world_size)
+                last_bucket.stale_bucket.data.copy_(last_bucket.temp_cuda_buffer, non_blocking=True)
+                # last_bucket.temp_cuda_buffer = None
+                last_bucket.handle_for_stale_bucket_copy.record()
+
     def start_stale_grad_sync(self):
-        # if torch.distributed.get_rank() == 0:
-        #     print('GradBuffer start stale grad sync', flush=True)
+
         if self.fast_slow_grad_reduce_helper and self.fast_slow_grad_reduce_helper.last_iter_updated_successfully:
             # print("JINDA_DEBUG: start_stale_grad_sync() last_iter_updated_successfully is True", flush=True)
             for stale_bucket in self.stale_buckets:
@@ -768,7 +782,7 @@ class GradBuffer:
                 that D2H copy of the high precision gradients is finished. This is because we
                 need to offload high precision gradients to CPU, to reduce the GPU memory usage."""
                 if stale_bucket.parent_bucket.handle_for_stale_bucket_copy is not None:
-                    stale_bucket.parent_bucket.handle_for_stale_bucket_copy.synchronize()
+                    stale_bucket.parent_bucket.handle_for_stale_bucket_copy.wait()
                     stale_bucket.parent_bucket.handle_for_stale_bucket_copy = None
                 stale_bucket.start_grad_sync()
 
@@ -805,6 +819,19 @@ class GradBuffer:
     #             self.fast_slow_grad_reduce_helper.bucket_wise_optimizer_step(bucket)
     #         event.record()
 
+    def dispatch_H2D_copy(self):
+        for i, bucket in enumerate(self.buckets):
+            bucket.stale_bucket.finish_grad_sync()
+            bucket.stale_bucket.reset()
+            if self.fast_slow_grad_reduce_helper and self.fast_slow_grad_reduce_helper.last_iter_updated_successfully:
+                bucket.bucket_wise_optimizer_event = torch.cuda.Event()
+                bucket.HtoD_stream.wait_stream(torch.cuda.default_stream())
+                with torch.cuda.stream(bucket.HtoD_stream):
+                    bucket.fast_slow_grad_reduce_helper.bucket_wise_copy_high_precision_grads_to_main_grads_each_bucket(bucket)
+                    bucket.fast_slow_grad_reduce_helper.bucket_wise_optimizer_step(bucket)
+                    bucket.fast_slow_grad_reduce_helper.zero_optimizer_shard_grad()
+                    bucket.bucket_wise_optimizer_event.record()
+
     def register_grad_ready(self, param: torch.nn.Parameter):
         """
         Registers grads for the passed-in param to be "ready" for grad sync.
@@ -817,7 +844,7 @@ class GradBuffer:
         ), 'register_grad_ready() should only be called when overlap_grad_reduce is True'
         if self.is_last_microbatch:
             bucket = self.param_to_bucket[param]
-            bucket.register_grad_ready(param)
+            bucket.register_grad_ready(param, bucket==self.buckets[0], bucket==self.buckets[-1])
     
     def start_using_temp_buffer(self, event):
         """Since we need to offload high precision gradients to CPU, and this transfer is slow, we need to use a temp buffer 

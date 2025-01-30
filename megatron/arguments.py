@@ -1195,6 +1195,8 @@ def _add_distributed_args(parser):
                        help='If true, gradient reduce-scatter will happen twice, first is low precision, second is high precision.')
     group.add_argument('--high-precision-grad-device',  type=str, default='cpu',
                        help='Device to store high precision gradient buffer.')
+    group.add_argument('--bucket-size', type=int, default=40000000,
+                          help='Bucket size for Distributed Optimizer')
     return parser
 
 def _add_quantize_args(parser):
