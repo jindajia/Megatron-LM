@@ -1375,7 +1375,7 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
             self._copy_params_from_param_buffer(all_gather_handle_index)
             self.param_buffer_copied[all_gather_handle_index] = True
         if all_gather_handle is not None:
-            if all_gather_handle_index == 1:
+            if all_gather_handle_index == 0:
                 for grad_buffer_idx, grad_buffer in enumerate(self.grad_buffers):
                     grad_buffer.start_last_bucket_D2H_copy()
             elif next_all_gather_handle_index == self.num_all_gather_handles:
