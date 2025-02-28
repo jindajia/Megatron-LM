@@ -685,6 +685,7 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
         self.remove_pre_hook_handle = torch.nn.modules.module.register_module_forward_pre_hook(
             self._make_forward_pre_hook()
         )
+        self._copy_main_params_to_model_params()
 
     def get_model_param_range_map(self, param):
         """
