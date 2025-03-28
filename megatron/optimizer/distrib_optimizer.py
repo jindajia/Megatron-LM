@@ -1375,10 +1375,18 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
             self._copy_params_from_param_buffer(all_gather_handle_index)
             self.param_buffer_copied[all_gather_handle_index] = True
         if all_gather_handle is not None:
-            if all_gather_handle_index == 0:
+            if self.num_all_gather_handles > 1:
+                """Since embeding layer has something related to assertion, which will trigger sync, so we want to avoid it.
+                    As a result, we start the copy at second bucket.
+                """
+                start_copy_at_index = 1
+            else:
+                start_copy_at_index = 0
+            if all_gather_handle_index == start_copy_at_index:
                 for grad_buffer_idx, grad_buffer in enumerate(self.grad_buffers):
                     grad_buffer.start_last_bucket_D2H_copy()
-            elif next_all_gather_handle_index == self.num_all_gather_handles:
+
+            if next_all_gather_handle_index == self.num_all_gather_handles:
                 for grad_buffer_idx, grad_buffer in enumerate(self.grad_buffers):
                     grad_buffer.start_stale_grad_sync()
 
