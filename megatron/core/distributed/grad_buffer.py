@@ -766,7 +766,7 @@ class GradBuffer:
     def start_last_bucket_D2H_copy(self):
         if self.fast_slow_grad_reduce_helper is not None:
             last_bucket = self.buckets[-1]
-            last_bucket.DtoH_stream.wait_stream(torch.cuda.default_stream())
+            # last_bucket.DtoH_stream.wait_stream(torch.cuda.default_stream())
             with torch.cuda.stream(last_bucket.DtoH_stream):
                 last_bucket.temp_cuda_buffer.div_(self.data_parallel_world_size)
                 last_bucket.stale_bucket.data.copy_(last_bucket.temp_cuda_buffer, non_blocking=True)
