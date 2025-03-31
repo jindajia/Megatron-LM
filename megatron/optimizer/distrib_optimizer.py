@@ -1327,6 +1327,9 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
                 all_gather_handle_index = self.param_to_all_gather_handle_index_map[param]
                 self._finish_param_sync_helper(all_gather_handle_index)
 
+            # for grad_buffer_idx, grad_buffer in enumerate(self.grad_buffers):
+            #     grad_buffer.query_to_dispatch_H2D_copy()
+            
 
         return hook
 
@@ -1382,6 +1385,7 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
                 start_copy_at_index = 1
             else:
                 start_copy_at_index = 0
+            # print(f"JINDA_DEBUG: rank:{torch.distributed.get_rank()}, num of grad_buffers: ", len(self.grad_buffers))
             if all_gather_handle_index == start_copy_at_index:
                 for grad_buffer_idx, grad_buffer in enumerate(self.grad_buffers):
                     grad_buffer.start_last_bucket_D2H_copy()
