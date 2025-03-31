@@ -1,11 +1,11 @@
 #!/bin/bash
-#SBATCH -J 2xA100Nodes
+#SBATCH -J 8xH100Nodes
 #SBATCH -p gpu-debug
 #SBATCH -A r01156
-#SBATCH -o /N/slate/jindjia/bash_scripts/bytedance2/icml-performance-bytedance/tasks/2xA100Nodes/batch_output_%j.txt
+#SBATCH -o /N/slate/jindjia/bash_scripts/bytedance2/icml-performance-bytedance/tasks/8xA100Nodes/batch_output_%j.txt
 #SBATCH --nodes=2
 #SBATCH --ntasks-per-node=1
-#SBATCH --gpus-per-node=4
+#SBATCH --gpus-per-node=8
 #SBATCH --cpus-per-task=60
 #SBATCH --mem=240g
 #SBATCH --time=01:00:00
@@ -19,7 +19,7 @@ export LOG_INTERVAL=1
 export EXIT_INTERVAL=40
 export WANDB_PROJECT=icml-performance-test
 export SCRIPT_DIR=/N/slate/jindjia/bash_scripts/bytedance2/icml-performance-bytedance
-export OUTPUT_BASE_DIR=/N/slate/jindjia/bash_scripts/bytedance2/icml-performance-bytedance/tasks/2xA100Nodes/output_dir-acc32-setting1
+export OUTPUT_BASE_DIR=/N/slate/jindjia/bash_scripts/bytedance2/icml-performance-bytedance/tasks/8_8xH100Nodes/output_dir-acc32-setting1
 
 # ----------------- Numerber of GPUs  -----------------
 
