@@ -46,10 +46,8 @@ MODEL_LIST=(
 )
 
 TRAIN_CONFIG_LIST=(
-    "Baseline"
     "SDP4Bit" 
     "DUO4Bit" 
-    "DUO1Bit" 
 ) 
 
 export ACCUMULATION_STEP=32

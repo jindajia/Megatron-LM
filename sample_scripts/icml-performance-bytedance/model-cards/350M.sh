@@ -2,8 +2,8 @@ MODEL_ARGS="
     --num-layers 24 \
     --hidden-size 1024 \
     --num-attention-heads 16 \
-    --seq-length 2048 \
-    --max-position-embeddings 2048 \
+    --seq-length 4096 \
+    --max-position-embeddings 4096 \
 "
 
 OPTIMIZER_ARGS="

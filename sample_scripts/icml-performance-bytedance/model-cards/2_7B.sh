@@ -2,8 +2,8 @@ MODEL_ARGS="
     --num-layers 32 \
     --hidden-size 2560 \
     --num-attention-heads 32 \
-    --seq-length 2048 \
-    --max-position-embeddings 2048 \
+    --seq-length 4096 \
+    --max-position-embeddings 4096 \
 "
 
 OPTIMIZER_ARGS="
@@ -25,7 +25,7 @@ OPTIMIZER_ARGS="
 
 export TENSOR_PARALLEL_SIZE=8
 export PIPELINE_PARALLEL_SIZE=1
-export MICRO_BATCH_SIZE=8
+export MICRO_BATCH_SIZE=4
 
 WORLD_SIZE=$(( NNODES * GPUS_PER_NODE ))
 ACCUMULATION_STEP=${ACCUMULATION_STEP:-32}
