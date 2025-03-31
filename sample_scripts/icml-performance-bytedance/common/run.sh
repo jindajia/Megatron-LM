@@ -26,9 +26,9 @@ DISTRIBUTED_ARGS="
 "
 
 DATA_ARGS="
-    --data-path $DATA_PATH \
     --vocab-file $VOCAB_FILE \
     --merge-file $MERGE_FILE \
+    --mock-data \
 "
 
 OUTPUT_ARGS="
