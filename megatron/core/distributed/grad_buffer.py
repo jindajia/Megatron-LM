@@ -599,6 +599,7 @@ class GradBuffer:
         
         DtoH_stream = None
         HtoD_stream = None
+        clone_stream = None
         "We use None to indicate that we are not using fast slow grad reduce"
         self.dispatch_H2D_idx = None 
         if self.fast_slow_grad_reduce_helper is not None:
