@@ -37,7 +37,6 @@ nvidia-smi
 
 # ----------------- Model and Training Config -----------------
 MODEL_LIST=(
-    "350M"
     "1_3B" 
     "2_7B"
     "6_7B"
