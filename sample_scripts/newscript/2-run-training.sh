@@ -73,6 +73,7 @@ TRAIN_CONFIG_LIST=(
 function set_model() {
 
 # Example "350M" content
+MODEL_NAME="350M"
 MODEL_ARGS="
     --num-layers 24 \
     --hidden-size 1024 \
@@ -85,6 +86,7 @@ export PIPELINE_PARALLEL_SIZE=1
 export MICRO_BATCH_SIZE=1
 
 # Example "6.7B" content
+# MODEL_NAME="6_7B"
 # MODEL_ARGS="
 #     --num-layers 32 \
 #     --hidden-size 4096 \
@@ -97,6 +99,7 @@ export MICRO_BATCH_SIZE=1
 # export MICRO_BATCH_SIZE=1
 
 # Example "13B" content
+# MODEL_NAME="13B"
 # MODEL_ARGS="
 #     --num-layers 40 \
 #     --hidden-size 5120 \
@@ -109,6 +112,7 @@ export MICRO_BATCH_SIZE=1
 # export MICRO_BATCH_SIZE=1
 
 # Example "18B" content
+# MODEL_NAME="18B"
 # export MODEL_ARGS="
 #     --num-layers 40 \
 #     --hidden-size 6144 \
@@ -218,14 +222,14 @@ for train_config_name in "${TRAIN_CONFIG_LIST[@]}"; do
     exit 1
     fi
 
-    echo "Running $model_name / $train_config_name on $NNODES nodes"
-    export WANDB_NAME="${model_name}_${train_config_name}_${NNODES}_NODES"
+    echo "Running $MODEL_NAME / $train_config_name on $NNODES nodes"
+    export WANDB_NAME="${MODEL_NAME}_${train_config_name}_${NNODES}_NODES"
 
     # Compose an OUTPUT_DIR per run
     # If you rely on SLURM_JOB_ID, define it or remove references
     # (below we just use a dummy "job_id_1234" for demonstration)
     job_id="$(date '+%Y%m%d_%H%M%S')"
-    export OUTPUT_DIR="${OUTPUT_BASE_DIR}/${NNODES}_NODES/${job_id}/${model_name}/${train_config_name}"
+    export OUTPUT_DIR="${OUTPUT_BASE_DIR}/${NNODES}_NODES/${job_id}/${MODEL_NAME}/${train_config_name}"
     export WANDB_DIR="${OUTPUT_DIR}/wandb_logs"
     export TENSORBOARD_DIR="${OUTPUT_DIR}/tb_logs"
     mkdir -p "${OUTPUT_DIR}"
