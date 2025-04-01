@@ -303,7 +303,6 @@ for train_config_name in "${TRAIN_CONFIG_LIST[@]}"; do
         $DUO_ARGS \
         --distributed-backend "cpu:gloo,cuda:nccl" \
         --exit-interval "${EXIT_INTERVAL}" \
-        --save "${OUTPUT_DIR}/checkpoints" \
         2>&1 | tee -a "${OUTPUT_DIR}/train.log"
 
 done
