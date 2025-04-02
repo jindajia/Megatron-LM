@@ -8,6 +8,7 @@ import sys
 import setuptools
 from setuptools import Extension, setup
 from setuptools.command.build_ext import build_ext
+from importlib import import_module
 
 spec = importlib.util.spec_from_file_location('package_info', 'megatron/core/package_info.py')
 package_info = importlib.util.module_from_spec(spec)
@@ -51,6 +52,54 @@ def req_file(filename, folder="megatron/core"):
 
 install_requires = req_file("requirements.txt")
 
+
+
+class CustomBuildExt(build_ext):
+    """Custom build_ext that compiles the siwzzle quant module."""
+
+
+
+    def build_or_import_siwzzle_quant_module(self):
+        pkg_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'tools/jet_quant_cuda')
+        module_name = 'quantization_cuda'
+
+        def find_build_lib(base_path):
+            for root, dirs, files in os.walk(base_path):
+                for d in dirs:
+                    if d.startswith("lib."):
+                        return os.path.join(root, d)
+            return None
+
+        def find_module(pkg_path, module_name):
+            build_lib_path = find_build_lib(os.path.join(pkg_path, 'build'))
+            if build_lib_path:
+                sys.path.append(build_lib_path)
+            else:
+                return None
+            
+            module = import_module(module_name)
+            
+            return module
+
+        def build_module(pkg_path):
+            setup_path = os.path.join(pkg_path, 'setup.py')
+            build_base_path = os.path.join(pkg_path, 'build')
+            build_cmd = [sys.executable, setup_path, 'build', '--build-base', build_base_path]
+            subprocess.check_call(build_cmd)
+
+        module = find_module(pkg_path, module_name)
+        if module is not None:
+            return module
+        else:
+            build_module(pkg_path)
+            module = find_module(pkg_path, module_name)
+            return module
+
+    def run(self):
+        # Run the custom quant module build task
+        self.build_or_import_siwzzle_quant_module()
+        # Then proceed with the usual build_ext
+        super().run()
 
 ###############################################################################
 #                             Extension Making                                #
@@ -126,4 +175,7 @@ setuptools.setup(
     include_package_data=True,
     # PyPI package information.
     keywords=__keywords__,
+    install_requires=install_requires,
+    cmdclass={"build_ext": CustomBuildExt},
+
 )
