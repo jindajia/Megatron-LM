@@ -197,7 +197,7 @@ def optimizer_helper_step(optimizer, args, timers):
             *shard_fp32_params_this_group, 
             *shard_fp32_from_float16_params_this_group
         ]
-    optimizer.optimizer.step()
+    optimizer.optimizer.no_update_mv_step()
 
 
     # JINDA_DEBUG print

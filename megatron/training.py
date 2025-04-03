@@ -572,21 +572,8 @@ def train_step(forward_step_func, data_iterator,
 
     timers('optimizer-roll-back', log_level=1).start(barrier=args.barrier_with_L1_time)
     if fast_slow_grad_reduce_helper is not None:
-        if  fast_slow_grad_reduce_helper.last_iter_updated_successfully is True:
-            for group_index, param_group in enumerate(optimizer.optimizer.param_groups):
-                if len(param_group['params']) > 0:
-                    if 'step' in param_group:
-                        param_group['step'] += 1
-                    else:
-                        param_group['step'] = 1
         # if args.curr_iteration > 0:
         optimizer.save_parameters_backup()
-        step_list_copy = []
-        for group_index, param_group in enumerate(optimizer.optimizer.param_groups):
-            if 'step' in param_group:
-                step_list_copy.append(param_group['step'])
-            else:
-                step_list_copy.append(None)
     timers('optimizer-roll-back').stop()
 
     # for group_index, param_group in enumerate(optimizer.optimizer.param_groups):
@@ -635,13 +622,6 @@ def train_step(forward_step_func, data_iterator,
                 # print(f'JINDA_DEBUG: start rollback_optimizer_step')
             # rollback_optimizer_step(optimizer.optimizer)
             optimizer.rollback_parameters()
-            for group_index, param_group in enumerate(optimizer.optimizer.param_groups):
-                if step_list_copy[group_index] is not None:
-                    param_group['step'] = step_list_copy[group_index]
-                else:
-                    param_group.pop('step', None)
-            # if rank == 0:
-            #     print(f'rollback_optimizer_step finished')
     timers('optimizer-roll-back').stop()
     # for group_index, param_group in enumerate(optimizer.optimizer.param_groups):
     #     if 'step' in param_group:
