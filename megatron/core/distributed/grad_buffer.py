@@ -73,6 +73,7 @@ class StaleBucket:
         self.data_parallel_group = data_parallel_group
         self.data_parallel_world_size = data_parallel_world_size
         self.data_parallel_rank = torch.distributed.get_rank(group=data_parallel_group)
+        self.global_ranks = list(torch.distributed.get_global_rank(data_parallel_group, i) for i in range(data_parallel_world_size))
         self.use_distributed_optimizer = use_distributed_optimizer
         assert isinstance(grad_reduce_stream, torch.cuda.Stream)
         self.comm_stream = grad_reduce_stream
@@ -127,15 +128,31 @@ class StaleBucket:
                     # self.reduced_grads = local_data_view.clone() # DEBUG_ONLY
                     event.record()
             else:
-                # print('JINDA_DEBUG: StaleBucket start_grad_sync() CPU', flush=True)
-                # self.data /= self.data_parallel_world_size
-                # torch.cuda.synchronize()
-                handle = torch.distributed.all_reduce(
-                    self.data,
-                    group=self.data_parallel_group,
-                    async_op=True,
-                )
-                self.communication_event = handle
+                world_size = self.data_parallel_world_size
+                rank = self.data_parallel_rank
+                tensor_chunks = shard_buffer(self.data, world_size)
+                local_data_view = tensor_chunks[rank]
+
+                # Perform reduce on the corresponding chunk to rank
+                handles = []
+                for i in range(world_size):
+                    dst_global_rank = self.global_ranks[i]
+
+                    if torch.distributed.get_rank() in self.global_ranks:
+                        handle = torch.distributed.reduce(
+                            tensor_chunks[i],
+                            dst=dst_global_rank,
+                            op=torch.distributed.ReduceOp.SUM,
+                            group=self.data_parallel_group,
+                            async_op=True,
+                        )
+                        handles.append(handle)
+                    else:
+                        handles.append(None)
+
+                self.communication_event = [h for h in handles if h is not None]
+
+
 
         else:
             raise ValueError(f'Only support with distributed optimizer, but got')
@@ -144,7 +161,12 @@ class StaleBucket:
         if self.data.device.type == 'cuda':
             return self.communication_event.query()
         elif self.data.device.type == 'cpu':
-            return self.communication_event.is_completed()
+            completed = True
+            for handle in self.communication_event:
+                if not handle.is_completed():
+                    completed = False
+                    break
+            return completed
         else:
             raise ValueError(f'Invalid device type: {self.data.device.type}')
 
@@ -159,7 +181,11 @@ class StaleBucket:
             f'Communication call has not been issued for this bucket '
             f'({len(self.params_with_grad)}/{len(self.params)} params have grad available)'
         )
-        self.communication_event.wait()
+        if self.data.device.type == 'cuda':
+            self.communication_event.wait()
+        else:
+            for handle in self.communication_event:
+                handle.wait()
         self.communication_event = None
 
     # def call_optimizer_func(self):
