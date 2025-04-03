@@ -67,7 +67,20 @@ def optimizer_helper_step(optimizer, args, timers):
     # Do unscale, check for inf, and update grad scaler only for
     # the case that grad scaler is provided.
     if optimizer.grad_scaler:
-        assert False, "grad scaler for bucket-wise optimizer step not support"
+        # Unscale and check for inf/nan.
+        timers('optimizer-unscale-and-check-inf', log_level=1).start(
+            barrier=args.barrier_with_L1_time
+        )
+        found_inf_flag = optimizer._unscale_main_grads_and_check_for_nan()
+        timers('optimizer-unscale-and-check-inf').stop()
+
+        # We are done with scaling gradients
+        # so we can update the loss scale.
+        optimizer.grad_scaler.update(found_inf_flag)
+
+        # If we found inf/nan, skip the update.
+        if found_inf_flag:
+            return False, None, None
 
     # Clip the main gradients.
     timers('optimizer-clip-main-grad', log_level=1).start(barrier=args.barrier_with_L1_time)
@@ -76,49 +89,49 @@ def optimizer_helper_step(optimizer, args, timers):
         # ------------------------------ JINDA_DEBUG 1 Clip Grad bucket-wise ------------------------------
         # Option 1: Clip grad bucket wise.
         
-        params = optimizer.get_parameters()
-        grads_for_norm = optimizer.get_main_grads_for_grad_norm()
-        pre_given_total_norm = calculate_pre_given_total_norm(
-            params,
-            grads_for_norm,
-            optimizer.clip_grad,
-            optimizer.check_for_nan_in_grad,
-            model_parallel_group=optimizer.get_model_parallel_group(),
-        )
-        grad_norm = pre_given_total_norm
+        # params = optimizer.get_parameters()
+        # grads_for_norm = optimizer.get_main_grads_for_grad_norm()
+        # pre_given_total_norm = calculate_pre_given_total_norm(
+        #     params,
+        #     grads_for_norm,
+        #     optimizer.clip_grad,
+        #     optimizer.check_for_nan_in_grad,
+        #     model_parallel_group=optimizer.get_model_parallel_group(),
+        # )
+        # grad_norm = pre_given_total_norm
         
-        for gbuf_index, grad_buffer in enumerate(optimizer.grad_buffers):
-            dtype = grad_buffer.dtype
-            for bucket_index, _ in enumerate(grad_buffer.buckets):
-                for group_index, param_group in enumerate(optimizer.optimizer.param_groups):
-                    bucket_shard_fp32_params_this_group = optimizer.bucket_wise_shard_fp32_groups.get((gbuf_index, dtype, bucket_index, group_index), [])
-                    bucket_shard_fp32_from_float16_params_this_group = optimizer.bucket_wise_shard_fp32_from_float16_groups.get((gbuf_index, dtype, bucket_index, group_index), [])
-                    param_group['params'] = [
-                        *bucket_shard_fp32_params_this_group,
-                        *bucket_shard_fp32_from_float16_params_this_group,
-                    ]
-                params = optimizer.get_parameters()
-                grads_for_norm = optimizer.get_main_grads_for_grad_norm()
-                clip_grad_norm_fp32_with_pregiven_totalnorm(
-                    params,
-                    grads_for_norm,
-                    optimizer.clip_grad,
-                    optimizer.check_for_nan_in_grad,
-                    model_parallel_group=optimizer.get_model_parallel_group(),
-                    total_norm=pre_given_total_norm,
-                )
+        # for gbuf_index, grad_buffer in enumerate(optimizer.grad_buffers):
+        #     dtype = grad_buffer.dtype
+        #     for bucket_index, _ in enumerate(grad_buffer.buckets):
+        #         for group_index, param_group in enumerate(optimizer.optimizer.param_groups):
+        #             bucket_shard_fp32_params_this_group = optimizer.bucket_wise_shard_fp32_groups.get((gbuf_index, dtype, bucket_index, group_index), [])
+        #             bucket_shard_fp32_from_float16_params_this_group = optimizer.bucket_wise_shard_fp32_from_float16_groups.get((gbuf_index, dtype, bucket_index, group_index), [])
+        #             param_group['params'] = [
+        #                 *bucket_shard_fp32_params_this_group,
+        #                 *bucket_shard_fp32_from_float16_params_this_group,
+        #             ]
+        #         params = optimizer.get_parameters()
+        #         grads_for_norm = optimizer.get_main_grads_for_grad_norm()
+        #         clip_grad_norm_fp32_with_pregiven_totalnorm(
+        #             params,
+        #             grads_for_norm,
+        #             optimizer.clip_grad,
+        #             optimizer.check_for_nan_in_grad,
+        #             model_parallel_group=optimizer.get_model_parallel_group(),
+        #             total_norm=pre_given_total_norm,
+        #         )
         
-        """Here we need to set param_group back, I don't know why, must be somewhere used. TODO find where used it."""
-        for group_index, param_group in enumerate(optimizer.optimizer.param_groups):
-            shard_fp32_params_this_group = optimizer.shard_fp32_groups[group_index]
-            shard_fp32_from_float16_params_this_group = optimizer.shard_fp32_from_float16_groups[group_index]
-            param_group['params'] = [
-                *shard_fp32_params_this_group, 
-                *shard_fp32_from_float16_params_this_group
-            ]
+        # """Here we need to set param_group back, I don't know why, must be somewhere used. TODO find where used it."""
+        # for group_index, param_group in enumerate(optimizer.optimizer.param_groups):
+        #     shard_fp32_params_this_group = optimizer.shard_fp32_groups[group_index]
+        #     shard_fp32_from_float16_params_this_group = optimizer.shard_fp32_from_float16_groups[group_index]
+        #     param_group['params'] = [
+        #         *shard_fp32_params_this_group, 
+        #         *shard_fp32_from_float16_params_this_group
+        #     ]
 
         # Option 2: Clip grad all in once.
-        # grad_norm = optimizer.clip_grad_norm(optimizer.clip_grad, optimizer.check_for_nan_in_grad)
+        grad_norm = optimizer.clip_grad_norm(optimizer.clip_grad, optimizer.check_for_nan_in_grad)
         
         # ------------------------------ JINDA_DEBUG 1 Clip Grad bucket-wise ------------------------------
 

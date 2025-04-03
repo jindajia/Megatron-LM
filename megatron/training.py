@@ -600,7 +600,11 @@ def train_step(forward_step_func, data_iterator,
     # ------------------------- JINDA_DEBUG for optimizer step -------------------------
     
     # Option 1 original optimizer step
-    update_successful, grad_norm, num_zeros_in_grad = optimizer.step(args, timers)
+    if fast_slow_grad_reduce_helper is None:
+        update_successful, grad_norm, num_zeros_in_grad = optimizer.step(args, timers)
+    else:
+        update_successful, grad_norm, num_zeros_in_grad = optimizer_helper_step(optimizer, args, timers)
+
     
     # Option 2 optimizer helper step
     # update_successful, grad_norm, num_zeros_in_grad = optimizer_helper_step(optimizer, args, timers)
