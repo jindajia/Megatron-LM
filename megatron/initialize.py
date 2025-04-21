@@ -103,7 +103,7 @@ def _compile_dependencies():
     # Compile dataset C++ code.
     # =========================
     # TODO: move this to ninja
-    if torch.distributed.get_rank() == 0:
+    if torch.cuda.current_device() == 0:
         start_time = time.time()
         print("> compiling dataset index builder ...")
         from megatron.core.datasets.utils import compile_helpers
@@ -147,7 +147,7 @@ def _compile_dependencies():
             )
 
     # Always build on rank zero first.
-    if torch.distributed.get_rank() == 0:
+    if torch.cuda.current_device() == 0:
         start_time = time.time()
         print("> compiling and loading fused kernels ...", flush=True)
         fused_kernels.load(args)
@@ -160,7 +160,7 @@ def _compile_dependencies():
     # rest of the program. We think this might ensure that
     # the lock is released.
     torch.distributed.barrier()
-    if torch.distributed.get_rank() == 0:
+    if torch.cuda.current_device() == 0:
         print(
             ">>> done with compiling and loading fused kernels. "
             "Compilation time: {:.3f} seconds".format(time.time() - start_time),
