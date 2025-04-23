@@ -572,6 +572,13 @@ def train_step(forward_step_func, data_iterator,
 
     timers('optimizer-roll-back', log_level=1).start(barrier=args.barrier_with_L1_time)
     if fast_slow_grad_reduce_helper is not None:
+        if  fast_slow_grad_reduce_helper.last_iter_updated_successfully is True:
+            for group_index, param_group in enumerate(optimizer.optimizer.param_groups):
+                if len(param_group['params']) > 0:
+                    if 'step' in param_group:
+                        param_group['step'] += 1
+                    else:
+                        param_group['step'] = 1
         # if args.curr_iteration > 0:
         optimizer.save_parameters_backup()
     timers('optimizer-roll-back').stop()
