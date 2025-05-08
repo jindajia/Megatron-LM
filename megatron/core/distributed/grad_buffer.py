@@ -296,7 +296,7 @@ class Bucket:
         event = torch.cuda.Event()
         self.communication_event = event
         self.communication_issued = True
-        if self.quantization_helper.gradient_quantization_bits_intra != 0 or self.quantization_helper.gradient_quantization_bits_inter != 0:
+        if self.quantization_helper is None or self.quantization_helper.gradient_quantization_bits_intra != 0 or self.quantization_helper.gradient_quantization_bits_inter != 0:
             self.data /= self.data_parallel_world_size
         # Use async_op only when overlap_grad_reduce is True.
         if self.use_distributed_optimizer:
