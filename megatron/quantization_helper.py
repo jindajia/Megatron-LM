@@ -5,6 +5,7 @@ import os
 from .quantization_cuda_builder import find_module, build_module
 
 _GRADIENT_COMM_DEBUG = int(os.getenv("GRADIENT_COMM_DEBUG", -1))
+_ZERO_BIT_NO_UPDATE = int(os.getenv("ZERO_BIT_NO_UPDATE", -1))
 
 def build_or_import_siwzzle_quant_module():
     pkg_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), '../','tools/jet_quant_cuda')
@@ -251,7 +252,7 @@ class QuantizationHelper:
 
     def quantized_reduce_scatter_intra_and_inter(self, tensor, received_buffer, stale_handle_event=None):
         assert tensor.numel() % self.gq_group_size_inter == 0 # tensor size must be multiple of group size
-        assert self.gq_group_size_inter  % (8 // min(self.gradient_quantization_bits_inter, self.gradient_quantization_bits_intra)) == 0 # group size must be multiple of 2 when using 4bits
+        # assert self.gq_group_size_inter  % (8 // min(self.gradient_quantization_bits_inter, self.gradient_quantization_bits_intra)) == 0 # group size must be multiple of 2 when using 4bits
         assert self.gq_group_size_inter % 8 == 0 # group size must be multiple of 8 when tensor is half type; must be multiple of 4 when type is float. 
                                     # That is because cuda swizzle quant function will load 4 float or 8 half for each thread step to get better performance
         assert (tensor.numel() // self.gq_group_size_intra) % (self.inter_dp_size * self.intra_dp_size * self.gradient_alltoall_pipeline) == 0
@@ -336,7 +337,7 @@ class QuantizationHelper:
 
     def quantized_reduce_scatter_intra_only(self, tensor, received_buffer, stale_handle_event=None):
         assert tensor.numel() % self.gq_group_size_inter == 0 # tensor size must be multiple of group size
-        assert self.gq_group_size_inter  % (8 // min(self.gradient_quantization_bits_inter, self.gradient_quantization_bits_intra)) == 0 # group size must be multiple of 2 when using 4bits
+        # assert self.gq_group_size_inter  % (8 // min(self.gradient_quantization_bits_inter, self.gradient_quantization_bits_intra)) == 0 # group size must be multiple of 2 when using 4bits
         assert self.gq_group_size_inter % 8 == 0 # group size must be multiple of 8 when tensor is half type; must be multiple of 4 when type is float. 
                                     # That is because cuda swizzle quant function will load 4 float or 8 half for each thread step to get better performance
         # assert (tensor.numel() // self.gq_group_size_inter) % (num_nodes * local_world_size * pipeline) == 0
@@ -384,7 +385,7 @@ class QuantizationHelper:
     def quantized_reduce_scatter_inter_only(self, tensor, received_buffer, stale_handle_event=None):
 
         assert tensor.numel() % self.gq_group_size_inter == 0 # tensor size must be multiple of group size
-        assert self.gq_group_size_inter  % (8 // min(self.gradient_quantization_bits_inter, self.gradient_quantization_bits_intra)) == 0 # group size must be multiple of 2 when using 4bits
+        # assert self.gq_group_size_inter  % (8 // min(self.gradient_quantization_bits_inter, self.gradient_quantization_bits_intra)) == 0 # group size must be multiple of 2 when using 4bits
         assert self.gq_group_size_inter % 8 == 0 # group size must be multiple of 8 when tensor is half type; must be multiple of 4 when type is float. 
                                     # That is because cuda swizzle quant function will load 4 float or 8 half for each thread step to get better performance
 
@@ -432,6 +433,13 @@ class QuantizationHelper:
         return received_buffer
         
     def quantized_reduce_scatter(self, tensor, received_buffer, stale_handle_event=None):
+        if self.gradient_quantization_bits_intra == 0 and self.gradient_quantization_bits_inter == 0:
+            dp_rank = torch.distributed.get_rank(group=self.data_parallel_group)
+            chunk_size = tensor.numel() // torch.distributed.get_world_size(group=self.data_parallel_group)
+            received_buffer.copy_(tensor[dp_rank*chunk_size:(dp_rank+1)*chunk_size])
+            if _ZERO_BIT_NO_UPDATE == 1:
+                received_buffer.zero_()
+            return received_buffer
         if self.intra_dp_size > 1 and self.inter_dp_size > 1:
             return self.quantized_reduce_scatter_intra_and_inter(tensor, received_buffer, stale_handle_event)
         elif self.intra_dp_size > 1:
