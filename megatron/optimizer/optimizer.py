@@ -8,7 +8,7 @@ from apex.multi_tensor_apply import multi_tensor_applier
 import amp_C
 import torch
 import math
-
+import os
 from megatron import get_timers
 from megatron import print_rank_0
 from megatron.core import mpu, tensor_parallel
@@ -17,6 +17,7 @@ from megatron.model.module import param_is_not_shared
 
 from .clip_grads import clip_grad_norm_fp32, count_zeros_fp32
 
+high_precision_rollback = os.environ.get('HIGH_PRECISION_ROLLBACK', '0')
 
 def _zero_grad_group_helper(group, set_to_none):
     """Zero out the gradient for a group of parameters.
@@ -75,6 +76,8 @@ class MegatronOptimizer(ABC):
     
     @torch.no_grad()
     def save_parameters_backup(self):
+        if not high_precision_rollback:
+            return
         parameters = self.get_parameters()
         backups = []
         for param in parameters:
@@ -86,10 +89,14 @@ class MegatronOptimizer(ABC):
 
     @torch.no_grad()
     def rollback_parameters(self):
-        parameters = self.get_parameters()
-        for param, p in zip(parameters, self.parameters_backup):
-            param.copy_(p)
-        self.parameters_backup = None
+        if high_precision_rollback:
+            # Rollback the parameters to the backup
+            parameters = self.get_parameters()
+            for param, p_ref in zip(parameters, self.parameters_backup):
+                param.copy_(p_ref)
+            self.parameters_backup = None
+        else:
+            self.optimizer.rollback_parameter()
 
     def get_main_grads_for_grad_norm(self):
 
