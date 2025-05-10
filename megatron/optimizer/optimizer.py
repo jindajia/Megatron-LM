@@ -17,7 +17,7 @@ from megatron.model.module import param_is_not_shared
 
 from .clip_grads import clip_grad_norm_fp32, count_zeros_fp32
 
-high_precision_rollback = os.environ.get('HIGH_PRECISION_ROLLBACK', '0')
+high_precision_rollback = os.environ.get('HIGH_PRECISION_ROLLBACK', '1')
 
 def _zero_grad_group_helper(group, set_to_none):
     """Zero out the gradient for a group of parameters.
