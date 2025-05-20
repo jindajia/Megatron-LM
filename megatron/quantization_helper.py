@@ -413,14 +413,12 @@ class QuantizationHelper:
         
         """inter node quantization and all-to-all"""
         quant_tensor, quant_scales = st_quant(tensor, inter_quant_group, self.gradient_quantization_bits_inter, quant_module.Symmetric)
-        # print(f"JINDA_DEBUG: quant_tensor size: {quant_tensor.size()}, dtype: {quant_tensor.dtype}")
         """all to all"""
         all_to_all_output_tensor = torch.empty_like(quant_tensor)
         all_to_all_output_scales = torch.empty_like(quant_scales)
         all_to_all_single(all_to_all_output_tensor, quant_tensor, group=groups[f'global_{pp_rank}_{tp_rank}_{inter_idx}'])
         all_to_all_single(all_to_all_output_scales, quant_scales, group=groups[f'global_{pp_rank}_{tp_rank}_{inter_idx}'])
 
-        # print(f"JINDA_DEBUG: all_to_all_output_tensor size: {all_to_all_output_tensor.size()}, dtype: {all_to_all_output_tensor.dtype}")
 
         """dequantizeReduction"""
         final_dequant(all_to_all_output_tensor, 

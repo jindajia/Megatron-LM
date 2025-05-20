@@ -586,12 +586,9 @@ def train_step(forward_step_func, data_iterator,
     # for group_index, param_group in enumerate(optimizer.optimizer.param_groups):
     #     if 'step' in param_group:
     #         step = param_group['step']
-    #         print(f'JINDA_DEBUG before optimizer step, iter: {args.curr_iteration}, rank: {rank}, group_index: {group_index},   param step:{step}')
     #     else:
-    #         print(f'JINDA_DEBUG before optimizer step, iter: {args.curr_iteration}, rank: {rank}, group_index: {group_index},   param step: None')
 
 
-    # ------------------------- JINDA_DEBUG for optimizer step -------------------------
     
     # Option 1 original optimizer step
     if fast_slow_grad_reduce_helper is None:
@@ -613,7 +610,6 @@ def train_step(forward_step_func, data_iterator,
     # else:
     #     update_successful, grad_norm, num_zeros_in_grad = optimizer.step(args, timers)
 
-    # ------------------------- JINDA_DEBUG for optimizer step -------------------------
     timers('optimizer').stop()
 
     timers('optimizer-roll-back', log_level=1).start(barrier=args.barrier_with_L1_time)
@@ -626,16 +622,13 @@ def train_step(forward_step_func, data_iterator,
         if do_high_precision_grad_optimizer_step_for_curr_iter is True:
             # Optimizer State rollback.
             # if rank == 0:
-                # print(f'JINDA_DEBUG: start rollback_optimizer_step')
             # rollback_optimizer_step(optimizer.optimizer)
             optimizer.rollback_parameters()
     timers('optimizer-roll-back').stop()
     # for group_index, param_group in enumerate(optimizer.optimizer.param_groups):
     #     if 'step' in param_group:
     #         step = param_group['step']
-    #         print(f'JINDA_DEBUG after optimizer step, iter: {args.curr_iteration}, rank: {rank}, group_index: {group_index},   param step:{step}')
     #     else:
-    #         print(f'JINDA_DEBUG after optimizer step, iter: {args.curr_iteration}, rank: {rank}, group_index: {group_index},   param step: None')
 
     # Vision momentum.
     if args.vision_pretraining and args.vision_pretraining_type == "dino":

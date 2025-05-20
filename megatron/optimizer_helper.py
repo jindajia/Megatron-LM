@@ -27,14 +27,10 @@ class FastSlowGradReduceHelper:
         self.last_iter_total_norm = last_iter_total_norm
 
     def bucket_wise_optimizer_step(self, bucket):
-        # print(f'JINDA_DEBUG: condition3.1')
         bucket_map_to_global_idx = self.optimizer.bucket_map_to_global_idx
-        # print(f'JINDA_DEBUG: condition3.2')
         assert bucket in bucket_map_to_global_idx, f"bucket {bucket} not in bucket_map_to_global_idx"
-        # print(f'JINDA_DEBUG: condition3.3')
 
         (gbuf_index, dtype, bucket_index) = bucket_map_to_global_idx[bucket]
-        # print(f'JINDA_DEBUG: condition3.4')
         optimizer_helper_bucket_wise_inner_step(self.optimizer, gbuf_index, dtype, bucket_index, self.last_iter_total_norm)
 
     def bucket_wise_copy_high_precision_grads_to_main_grads_each_bucket(self, bucket):
@@ -52,7 +48,6 @@ def optimizer_helper_step(optimizer, args, timers):
     # Copy gradients from model params to main params.
     timers('optimizer-copy-to-main-grad', log_level=1).start(barrier=args.barrier_with_L1_time)
     
-    # ------------------------- JINDA_DEBUG 1 copy model grads to main -------------------------
     # Option 1: Copy grad all in once.
     optimizer._copy_model_grads_to_main_grads()
 
@@ -86,7 +81,6 @@ def optimizer_helper_step(optimizer, args, timers):
     timers('optimizer-clip-main-grad', log_level=1).start(barrier=args.barrier_with_L1_time)
     grad_norm = None
     if optimizer.clip_grad > 0.0:
-        # ------------------------------ JINDA_DEBUG 1 Clip Grad bucket-wise ------------------------------
         # Option 1: Clip grad bucket wise.
         
         # params = optimizer.get_parameters()
@@ -133,7 +127,6 @@ def optimizer_helper_step(optimizer, args, timers):
         # Option 2: Clip grad all in once.
         grad_norm = optimizer.clip_grad_norm(optimizer.clip_grad, optimizer.check_for_nan_in_grad)
         
-        # ------------------------------ JINDA_DEBUG 1 Clip Grad bucket-wise ------------------------------
 
     timers('optimizer-clip-main-grad').stop()
 
@@ -146,7 +139,6 @@ def optimizer_helper_step(optimizer, args, timers):
     timers('optimizer-inner-step', log_level=1).start(barrier=args.barrier_with_L1_time)
     # optimizer.optimizer.step()
 
-    # ------------------------- JINDA_DEBUG 2 for bucket-wise optimizer -------------------------
 
     if torch.distributed.is_initialized():
         rank = torch.distributed.get_rank()
@@ -155,7 +147,7 @@ def optimizer_helper_step(optimizer, args, timers):
 
     # Option 1:Step the optimizer for bucket-wise
     # if rank == 0:
-    #     print(f'JINDA_DEBUG: Step the optimizer for bucket-wise')
+    #     print(f'DEBUG: Step the optimizer for bucket-wise')
     # for gbuf_index, grad_buffer in enumerate(optimizer.grad_buffers):
     #     dtype = grad_buffer.dtype
     #     for bucket_index, _ in enumerate(grad_buffer.buckets):
@@ -189,7 +181,7 @@ def optimizer_helper_step(optimizer, args, timers):
 
     # Option 2: Step the optimizer for all
     # if rank == 0:
-    #     print(f'JINDA_DEBUG: Step the optimizer for all')
+    #     print(f'DEBUG: Step the optimizer for all')
     for group_index, param_group in enumerate(optimizer.optimizer.param_groups):
         shard_fp32_params_this_group = optimizer.shard_fp32_groups[group_index]
         shard_fp32_from_float16_params_this_group = optimizer.shard_fp32_from_float16_groups[group_index]
@@ -200,17 +192,14 @@ def optimizer_helper_step(optimizer, args, timers):
     optimizer.optimizer.no_update_mv_step()
 
 
-    # JINDA_DEBUG print
     # if rank == 0:
-    #     print(f'JINDA_DEBUG: optimizer.capturable: {optimizer.optimizer.capturable}, optimizer._dummy_overflow_buf: {optimizer.optimizer._dummy_overflow_buf}')
     #     for group_index, param_group in enumerate(optimizer.optimizer.param_groups):
     #         if 'step' in param_group:
     #             x = param_group['step']
     #         else:
     #             x = 'None'
-    #         print(f"JINDA_DEBUG: param_group[{group_index}]['step']: {x}, len(param_group[{group_index}]['params']): {len(param_group['params'])}, param_group[{group_index}]['bias_correction']: {param_group['bias_correction']}")
     
-    # ------------------------- JINDA_DEBUG 2 for bucket-wise optimizer -------------------------
+    # ------------------------- DEBUG 2 for bucket-wise optimizer -------------------------
 
     timers('optimizer-inner-step').stop()
 
@@ -249,11 +238,9 @@ def optimizer_helper_bucket_wise_inner_step(optimizer, gbuf_index, dtype, bucket
 
     Note: You need to pre check before excution. Since this will only triggered when last iter updated successfully. So no inf check and all gather inside.
     """
-    # print(f'JINDA_DEBUG: condition4')
 
     assert isinstance(optimizer, DistributedOptimizer)
     # assert pre_given_total_norm is not None, "pre_given_total_norm need to be given, will be used for gradient clip"
-    # print(f'JINDA_DEBUG: condition5')
 
     """Copy step size for each param_group"""
     step_list_copy = []
@@ -270,13 +257,11 @@ def optimizer_helper_bucket_wise_inner_step(optimizer, gbuf_index, dtype, bucket
             *bucket_shard_fp32_params_this_group,
             *bucket_shard_fp32_from_float16_params_this_group,
         ]
-    # print(f'JINDA_DEBUG: condition6')
 
     if pre_given_total_norm is not None:
         """Clip grad for bucket-wise"""
         params = optimizer.get_parameters()
         grads_for_norm = optimizer.get_main_grads_for_grad_norm()
-        # print(f'JINDA_DEBUG: condition6.1 total_norm={pre_given_total_norm}')
         clip_grad_norm_fp32_with_pregiven_totalnorm(
             params,
             grads_for_norm,
@@ -285,19 +270,15 @@ def optimizer_helper_bucket_wise_inner_step(optimizer, gbuf_index, dtype, bucket
             model_parallel_group=optimizer.get_model_parallel_group(),
             total_norm=pre_given_total_norm,
         )
-        # print(f'JINDA_DEBUG: condition7')
 
     """Step optimizer for bucket-wise"""
     optimizer.optimizer.step()
-    # print(f'JINDA_DEBUG: condition8')
 
     rank = torch.distributed.get_rank()
     # for group_index, param_group in enumerate(optimizer.optimizer.param_groups):
     #     if 'step' in param_group:
     #         step = param_group['step']
-    #         print(f'JINDA_DEBUG after buket wise optimizer step, rank: {rank}, group_index: {group_index},   param step:{step}')
     #     else:
-    #         print(f'JINDA_DEBUG after buket wise optimizer step, rank: {rank}, group_index: {group_index},   param step: None')
 
     """ We need to reset param_group['step], since optimzier.step will increase step by inside, as a result param_group['step'] will increase multiple times (once for each bucket)."""
     for group_index, param_group in enumerate(optimizer.optimizer.param_groups):
@@ -314,7 +295,6 @@ def optimizer_helper_bucket_wise_inner_step(optimizer, gbuf_index, dtype, bucket
             *shard_fp32_params_this_group, 
             *shard_fp32_from_float16_params_this_group
         ]
-    # print(f'JINDA_DEBUG: condition9')
 
 def debug_print_for_param_groups(param_groups):
     for group_index, group in enumerate(param_groups):
@@ -362,14 +342,12 @@ def clip_grad_norm_fp32_with_pregiven_totalnorm(
 
     # Scale.
     clip_coeff = max_norm / (total_norm + 1.0e-6)
-    # print(f'JINDA_DEBUG: condition6.2 clip_coeff={clip_coeff}')
     if clip_coeff < 1.0:
         # dummy_overflow_buf = torch.tensor([0], dtype=torch.int, device='cuda') # this will call cpu synchronize in background.
         dummy_overflow_buf = torch.zeros(1, dtype=torch.int, device='cuda')
         multi_tensor_applier(
             amp_C.multi_tensor_scale, dummy_overflow_buf, [grads, grads], clip_coeff
         )
-    # print(f'JINDA_DEBUG: condition6.3')
 
     return total_norm
 
@@ -472,11 +450,6 @@ def rollback_optimizer_step(optimizer):
         if len(group['params']) == 0:
             continue
         
-        # print(f"JINDA_DEBUG: rollback_optimizer_step len(group['params'])={len(group['params'])}, len(group_master['params'])={len(group_master['params'])}")
-        # if group['params'][0] is not None:
-        #     print(f"JINDA_DEBUG: group params dtype={group['params'][0].dtype}")
-        # if group_master['params'][0] is not None:
-        #     print(f"JINDA_DEBUG group_master params dtype={group_master['params'][0].dtype}")
         bias_correction = 1 if group['bias_correction'] else 0
         beta1, beta2 = group['betas']
 

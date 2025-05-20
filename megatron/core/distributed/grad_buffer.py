@@ -121,7 +121,6 @@ class StaleBucket:
                         group=self.data_parallel_group,
                         async_op=False,
                     )
-                    # print(f'JINDA_DEBUG: StaleBucket start_grad_sync() GPU', flush=True)
                     # fast_slow_grad_reduce_helper.bucket_wise_copy_high_precision_grads_to_main_grads_each_bucket(parent_bucket)
                     # torch.cuda.synchronize()
                     # self.fast_slow_grad_reduce_helper.bucket_wise_optimizer_step(self.parent_bucket)
@@ -359,7 +358,6 @@ class Bucket:
             # local_data_view = shard_buffer(self.data, self.data_parallel_world_size)[
             #     self.data_parallel_rank
             # ]
-            # print(f'JINDA_DEBUG: low precision reduce reduce sync!!! gbuf_idx: {gbuf_index}, bucket_idx: {bucket_index}, stale_bucket_norm: {torch.norm(local_data_view)}', flush=True)
 
     def finish_stale_grad_sync(self):
         self.stale_bucket.finish_grad_sync()
@@ -388,7 +386,6 @@ class Bucket:
         #         self.parent_ref.finish_H2D_copy()
         # If all params in bucket have grads available, issue communication call.
         if len(self.params_with_grad) == len(self.params):
-            # print(f"JINDA_DEBUG: rank:{torch.distributed.get_rank()}, register_grad_ready, islast_bucket: {islast_bucket}", flush=True)
             if self.stale_bucket is not None:
                 # if self.stale_bucket.communication_issued:
                 #     bucket_map_to_global_idx = self.fast_slow_grad_reduce_helper.optimizer.bucket_map_to_global_idx
@@ -450,7 +447,6 @@ class Bucket:
                 # torch.cuda.synchronize()
                 # bucket_map_to_global_idx = self.fast_slow_grad_reduce_helper.optimizer.bucket_map_to_global_idx
                 # (gbuf_index, dtype, bucket_index) = bucket_map_to_global_idx[self]
-                # print(f'JINDA_DEBUG: copy data to stale bucket, gbuf_idx: {gbuf_index}, bucket_idx: {bucket_index}, stale_bucket_norm: {torch.norm(self.stale_bucket.data)}', flush=True)
             self.start_grad_sync()
             # if self.stale_bucket is not None:
             #     # self.stale_bucket.data.copy_(self.data)
@@ -837,7 +833,6 @@ class GradBuffer:
     def start_stale_grad_sync(self):
 
         if self.fast_slow_grad_reduce_helper and self.fast_slow_grad_reduce_helper.last_iter_updated_successfully:
-            # print("JINDA_DEBUG: start_stale_grad_sync() last_iter_updated_successfully is True", flush=True)
             for stale_bucket in self.stale_buckets:
                 """Before starting high precision gradient reduce-scatter, we need to assure
                 that D2H copy of the high precision gradients is finished. This is because we

@@ -70,16 +70,11 @@ __global__ void __launch_bounds__(1024) dequant_reduce(float* reduced_data,
                     mem_access::load_global<mem_granularity>(
                         load_buffer, input_data + j * elems_per_in_tensor + iter_offset);
                     
-                    // printf("JINDA_DEBUG: group_index().x: %d\n", tb.group_index().x);
-                    // printf("JINDA_DEBUG: thread_index().x: %d\n", tb.thread_index().x);
-                    // printf("JINDA_DEBUG: group_index().x: %d, thread_index().x: %d, load_buffer[0]: %d\n", tb.group_index().x, tb.thread_index().x, load_buffer[0]);
-
                     quantize::Params<quantType, numBits> params(
                         input_scales + j * groups_per_in_tensor, iter_scale_idx);
 
                     float dequant_buffer[storage_values];
                     dequantize::chunk<numBits, quantType>(dequant_buffer, load_buffer, params);
-                    // printf("JINDA_DEBUG: group_index().x: %d, thread_index().x: %d, dequant_buffer[0], dequant_buffer[1]: %d\n", tb.group_index().x, tb.thread_index().x, dequant_buffer[0], dequant_buffer[1]);
 
 #pragma unroll
                     for (int k = 0; k < storage_values; k++) {

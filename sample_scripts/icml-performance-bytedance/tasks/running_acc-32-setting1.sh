@@ -10,7 +10,6 @@
 #SBATCH --mem=240g
 #SBATCH --time=01:00:00
 #SBATCH --mail-type=ALL
-#SBATCH --mail-user=jiajinda001@gmail.com
 
 set -x
 export MEGATRON_PATH="/N/slate/jindjia/RepeatComm/dev/Fast-Slow-performance"
